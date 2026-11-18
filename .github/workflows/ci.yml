@@ -31,12 +31,12 @@ jobs:
             ca-certificates curl git build-essential pkg-config \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base \
             gstreamer1.0-plugins-good
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal -c clippy,rustfmt
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
