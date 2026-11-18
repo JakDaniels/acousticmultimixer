@@ -1,0 +1,41 @@
+# Copyright 2026 Simon Annetts/Jak Daniels
+# SPDX-License-Identifier: MPL-2.0
+
+[package]
+name = "gst-plugin-acousticmultimixer"
+version = "0.1.0"
+authors = ["Simon Annetts/Jak Daniels"]
+repository = "https://github.com/JakDaniels/acousticmultimixer"
+license = "MPL-2.0"
+description = "Mix-minus audio mixer with acoustic space modelling"
+edition = "2024"
+rust-version = "1.92"
+
+[dependencies]
+gst = { package = "gstreamer", version = "0.25", features = ["v1_24"] }
+# gstreamer-base and gstreamer-audio come in with the element (PLAN.md step 1).
+
+[build-dependencies]
+gst-plugin-version-helper = "0.8"
+
+[lib]
+name = "gstacousticmultimixer"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[features]
+static = []
+capi = []
+
+[package.metadata.capi]
+min_version = "0.9.21"
+
+[package.metadata.capi.header]
+enabled = false
+
+[package.metadata.capi.library]
+install_subdir = "gstreamer-1.0"
+versioning = false
+
+[package.metadata.capi.pkg_config]
+requires_private = "gstreamer-1.0, gstreamer-base-1.0, gstreamer-audio-1.0, gobject-2.0, glib-2.0, gmodule-2.0"
