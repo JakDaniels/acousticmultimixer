@@ -343,6 +343,12 @@ is seamless).
   GStreamer plugins.
 - Workflows on the SpatialAudioServer pattern: versions from tags, drafts from `develop`, a release when a pull
   request into `main` is merged, the repository made public before the first release.
+- Agreed (2026-11-18): CI (`ci.yml`) also runs on pull requests, and a ruleset on `main` requires it, as in
+  SpatialAudioServer. The packages are built here and attached to this repository's release (its own versions;
+  usable without SpatialAudioServer). On a release, a `repository_dispatch` to SpatialAudioServer has its
+  `pages.yml` add them to the signed apt/dnf repositories, so the server package's *recommends* resolves there (needs
+  a token secret here with access to that repository: a fine-grained token or a GitHub App). SpatialAudioServer's
+  MSI build downloads the DLL from a pinned release of this repository, so each installer ships a known version.
 
 ### Later
 - Room geometry and image-source reflections (design.md "Future geometry support").
