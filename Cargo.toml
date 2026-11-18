@@ -12,8 +12,14 @@ edition = "2024"
 rust-version = "1.92"
 
 [dependencies]
+byte-slice-cast = "1.0"
+glib = "0.22"
 gst = { package = "gstreamer", version = "0.25", features = ["v1_24"] }
-# gstreamer-base and gstreamer-audio come in with the element (PLAN.md step 1).
+gst-base = { package = "gstreamer-base", version = "0.25", features = ["v1_24"] }
+gst-audio = { package = "gstreamer-audio", version = "0.25", features = ["v1_24"] }
+
+[dev-dependencies]
+gst-app = { package = "gstreamer-app", version = "0.25", features = ["v1_24"] }
 
 [build-dependencies]
 gst-plugin-version-helper = "0.8"

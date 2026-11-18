@@ -8,7 +8,7 @@ spatial rooms; the aim is for it to be generally useful and, in time, to be offe
 
 - The original design, with the DSP ideas and the cost analysis: [docs/design.md](docs/design.md). This plan
   holds the decisions; where they differ, this plan wins.
-- Status: **planning**. Nothing is built yet.
+- Status: **step 1 done** (2026-11-18): the template runs under our name, with a fixed width. Next: step 2.
 
 ## 1. Decisions so far
 
@@ -24,6 +24,7 @@ spatial rooms; the aim is for it to be generally useful and, in time, to be offe
 | Pair gains | the element computes level and direction from positions; the application may add a gain per (speaker, listener) pair on top (0 = muted), for per-person volume | 2026-11-18 |
 | Speaker facing | the `yaw` of a voice is accepted from the start but has no effect until the geometry work (Later) | 2026-11-18 |
 | Pad roles | one kind of participant: every `sink_N` has its `mix_N`; listen-only = `sink_N` never fed, talk-only = `mix_N` never linked (skipped) | 2026-11-18 |
+| Pad changes | fixed width, option (b) of step 1: construct-only `max-participants` (default 32, up to 256), pads numbered below it, the mix always that wide, so pads come and go without renegotiating; no access to AudioAggregator's private struct | 2026-11-18 |
 
 ## 2. The template: gst-plugins-rs `minus1mixer`
 
@@ -163,6 +164,29 @@ Each step ends with tests passing, `gst-launch-1.0` examples that work, and the 
   Expectation: (b). It also suits SpatialAudioServer, whose rooms have a fixed maximum (32) and whose
   `audiointerleave` already uses fixed slots for the same reason (section 2a).
 
+**Done (2026-11-18).** Taken from gst-plugins-rs commit 916404886 (2026-09-11). Renamed throughout: element
+`acousticmultimixer`, output pads `mix_%u`, and the GTypes, meta and debug categories (`acousticmultimixer`,
+`acousticmultimixer-mixer`, `acousticmultimixer-splitter`), so the two plugins can be loaded side by side.
+
+What we found:
+- **The workarounds are needed under (a).** The private-struct prefix they read (`GstAudioAggregatorPrivate` up to
+  `current_buffer`) is identical in 1.24.0 and 1.28.2, so (a) does work on both. But in a live test with inputs
+  joining and leaving every few milliseconds, the "output buffer pending" workaround fired about 200 times in
+  2 seconds: without it, every join or leave risks a renegotiation in the middle of an output buffer.
+- **(b) needs none of them.** With the width fixed, `negotiate` still runs whenever an output is linked (the
+  RECONFIGURE travels upstream), but with unchanged caps, and `negotiated_src_caps` does nothing when the caps are
+  equal (same code in 1.24.0 and 1.28.2). So the mixer uses only public API (`parent_negotiated_src_caps`), and a
+  configuration of the same width is taken from the next output buffer, without renegotiating.
+- **Cost of the width** (10 minutes of audio, 3 participants, release build, user CPU, sources included): (a) 7.6 s;
+  (b) at width 3: 7.7 s, 32: 9.6 s, 256: 25.4 s. The extra is the template's inner loop visiting every output
+  channel for every sample; step 2's loop skips unused outputs, so this mostly goes away.
+- All outputs are pushed from one thread: with more than one linked, each needs a `queue` (as after a `tee`), or
+  the first sink to preroll blocks the rest. Documented on the element.
+
+Decision: **(b)**. Tests: the template's three (spectrum and exact sums), plus pads added and removed while
+running with exact sums after each change, a live churn test (150 joins and leaves while audio flows, no errors,
+everyone still receiving), and capacity (numbers reused, refusal when full or out of range); 40 repeat runs clean.
+
 ### Step 2: stereo, distance and pan (parity with SpatialAudioServer's `matrix` engine)
 - Outputs become stereo; contributions become left/right gains per (speaker, listener) path, computed from the
   pad properties with the distance model and a constant-power pan from the angle relative to the listener's yaw.
@@ -170,6 +194,7 @@ Each step ends with tests passing, `gst-launch-1.0` examples that work, and the 
   branches per sample), so it vectorises. Gain ramps across the buffer when coefficients change.
 - Tests (with `gst_check::Harness` and `appsrc`/`appsink`): a listener never hears themselves; gains and pan
   match the formula for known positions; pads added and removed while playing; silence when alone.
+- The splitter's GAP events for outputs with nothing assume mono (a FIXME in the template): fix with stereo.
 - Benchmark: 32 participants with 3 and with 32 talking, CPU per path, against SpatialAudioServer's `matrix`
   engine (audiointerleave + audiomixmatrix) on the same machine.
 - **Here SpatialAudioServer can start using it** (issue #8 there): an `acoustic` engine, offered only when the

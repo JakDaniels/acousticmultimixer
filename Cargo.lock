@@ -12,6 +12,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomic_refcell"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21e4227379beff4205943696e6c3e0cd809bacdf3f0edd6e3dd153e2269571a4"
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -28,6 +34,12 @@ name = "bumpalo"
 version = "3.20.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "87a0cf66fd1eb2fb7b822cb78370d82303750809bc6ba855f3f58e517d3238db"
+
+[[package]]
+name = "byte-slice-cast"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7575182f7272186991736b70173b0ea045398f984bf5ebbb3804736ce1330c9d"
 
 [[package]]
 name = "cc"
@@ -128,6 +140,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "futures-sink"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
+
+[[package]]
 name = "futures-task"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -217,8 +235,13 @@ dependencies = [
 name = "gst-plugin-acousticmultimixer"
 version = "0.1.0"
 dependencies = [
+ "byte-slice-cast",
+ "glib",
  "gst-plugin-version-helper",
  "gstreamer",
+ "gstreamer-app",
+ "gstreamer-audio",
+ "gstreamer-base",
 ]
 
 [[package]]
@@ -254,6 +277,90 @@ dependencies = [
  "pin-project-lite",
  "smallvec",
  "thiserror",
+]
+
+[[package]]
+name = "gstreamer-app"
+version = "0.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97f8ae9238c2352398dcc084de28df3f7099af216ac6c160b52318d23f25c010"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "glib",
+ "gstreamer",
+ "gstreamer-app-sys",
+ "gstreamer-base",
+ "libc",
+]
+
+[[package]]
+name = "gstreamer-app-sys"
+version = "0.25.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0798b8aef6694341d40bb81edc759f8979b896b59f9f0f45d8cfa3bb7bf2e743"
+dependencies = [
+ "glib-sys",
+ "gstreamer-base-sys",
+ "gstreamer-sys",
+ "libc",
+ "system-deps",
+]
+
+[[package]]
+name = "gstreamer-audio"
+version = "0.25.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "544f14e19e3b7221845be0e5c2f2cf284576b7baa16835ac16def6e734bfa866"
+dependencies = [
+ "cfg-if",
+ "glib",
+ "gstreamer",
+ "gstreamer-audio-sys",
+ "gstreamer-base",
+ "libc",
+ "smallvec",
+]
+
+[[package]]
+name = "gstreamer-audio-sys"
+version = "0.25.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09a010deb715bc29953a07c6714249132e736b3daf3a529e70586b58a7063888"
+dependencies = [
+ "glib-sys",
+ "gobject-sys",
+ "gstreamer-base-sys",
+ "gstreamer-sys",
+ "libc",
+ "system-deps",
+]
+
+[[package]]
+name = "gstreamer-base"
+version = "0.25.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17cbd8f59586a369c40d4b0d2f3a61cf9e9287b3cf5503cdcd8e7c5faa99265e"
+dependencies = [
+ "atomic_refcell",
+ "cfg-if",
+ "glib",
+ "gstreamer",
+ "gstreamer-base-sys",
+ "libc",
+]
+
+[[package]]
+name = "gstreamer-base-sys"
+version = "0.25.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b05f77bfd76b5afee6b29c27dae19eaf5018b5cf8d0d17520f3de44c6385c32"
+dependencies = [
+ "glib-sys",
+ "gobject-sys",
+ "gstreamer-sys",
+ "libc",
+ "system-deps",
 ]
 
 [[package]]
