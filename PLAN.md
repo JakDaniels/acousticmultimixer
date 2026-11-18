@@ -144,8 +144,8 @@ gst-launch-1.0 acousticmultimixer name=m sink_1::y=4 sink_2::x=8 \
   (`distance-model` = `inverse`, `exponential` (default), `linear`; `reference-distance` 2, `rolloff` 1,
   `max-range` 60: SpatialAudioServer's `outdoor` profile; its `meeting` profile is linear, 10, 2, 60);
   `direction-model` (`head`, the default: the far ear later, quieter and duller; `pan`: a constant-power stereo
-  pan) and `air-absorption` (dB per metre at 8 kHz, default 0.1; `pan` with 0 is SpatialAudioServer's `matrix`
-  exactly); the aggregator properties `minus1mixer` already proxies (`latency`, `force-live`, …). Later: `room`,
+  pan), `air-absorption` (dB per metre at 8 kHz, default 0.1; `pan` with 0 is SpatialAudioServer's `matrix`
+  exactly) and `rear-shadow` (`head` only: the low-pass cut-off for a voice straight behind, default 4000 Hz); the aggregator properties `minus1mixer` already proxies (`latency`, `force-live`, …). Later: `room`,
   `reverb-level`.
 - Property changes only mark the scene as changed. The gains are recomputed at most once per output buffer, and a
   changed path ramps linearly from the old value to the new one across that buffer (10 ms by default). A new
@@ -262,6 +262,11 @@ everyone still receiving), and capacity (numbers reused, refusal when full or ou
 - `air-absorption` (default 0.1 dB per metre at 8 kHz, roughly real air): a one-pole low-pass on both ears whose
   loss at 8 kHz is that times the distance (30 m: cut-off 8 kHz; 60 m: 4.6 kHz). The far ear takes the lower of
   its two cut-offs.
+- `rear-shadow` (added after the first listening test, where front and back sounded the same): with `head`, a voice
+  behind is low-passed in both ears, as the outer ears shade sounds from behind; the cut-off falls from none at the
+  side to 4 kHz straight behind (about 3 dB down at 4 kHz, 7 dB at 8 kHz), following the cosine of the angle from
+  straight back. Listening with pink noise (the load tool's `--audio pink-noise`): front and back now differ, and
+  it sounds more realistic.
 - `dsp.rs`, free of GStreamer: per path and ear a gain, a delay and a one-pole low-pass; gains and delays ramp
   across the buffer when they change (so a turning listener's delays glide); each speaker keeps a short history
   (the longest ITD plus two samples), cleared, with the filters, after a gap in its input. A speaker whose paths

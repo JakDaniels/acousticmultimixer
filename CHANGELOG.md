@@ -12,4 +12,5 @@ What changed in each release.
   listening pose, gain, mute, per-listener trims); changes ramp over one buffer, so moving does not click.
 - Direction by a head model (`direction-model=head`, the default): the far ear hears a voice up to 0.66 ms later,
   quieter and duller; `direction-model=pan` keeps the stereo pan. Distant voices lose high frequencies
-  (`air-absorption`).
+  (`air-absorption`), and voices behind the listener are duller in both ears (`rear-shadow`), so front and back
+  sound different.

@@ -111,11 +111,13 @@ impl Orientation {
 }
 
 /// How one source sounds to one listener: a level (0 = silent, out of the mix), a pan (−1 left … 1 right: the
-/// sine of the source's angle from straight ahead), and the distance (0 without positions).
+/// sine of the source's angle from straight ahead), how far behind it is (0 at the side or in front … 1 straight
+/// behind: the cosine of its angle from straight back), and the distance (0 without positions).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rendering {
     pub gain: f64,
     pub pan: f64,
+    pub behind: f64,
     pub distance: f64,
 }
 
@@ -123,6 +125,7 @@ impl Rendering {
     pub const SILENT: Rendering = Rendering {
         gain: 0.0,
         pan: 0.0,
+        behind: 0.0,
         distance: 0.0,
     };
 
@@ -130,6 +133,7 @@ impl Rendering {
     pub const CENTRE: Rendering = Rendering {
         gain: 1.0,
         pan: 0.0,
+        behind: 0.0,
         distance: 0.0,
     };
 
@@ -174,6 +178,11 @@ pub fn render(
     }
     let [forward, left, _] = orientation.to_local(d);
     let horizontal = (forward * forward + left * left).sqrt();
+    let behind = if horizontal < 1e-6 {
+        0.0
+    } else {
+        (-forward / horizontal).max(0.0)
+    };
     let pan = if horizontal < 1e-6 {
         0.0
     } else {
@@ -182,6 +191,7 @@ pub fn render(
     Rendering {
         gain,
         pan,
+        behind,
         distance,
     }
 }
@@ -214,6 +224,9 @@ pub struct Acoustics {
     pub direction: DirectionModel,
     /// High-frequency loss with distance, in dB per metre at 8 kHz (air: about 0.1); 0 = none.
     pub air_absorption: f64,
+    /// Head model: the low-pass cut-off (Hz) for a source straight behind, as the outer ears shade sounds from
+    /// behind; none at the side and in front. 0 = none.
+    pub rear_shadow: f64,
 }
 
 impl Default for Acoustics {
@@ -221,11 +234,14 @@ impl Default for Acoustics {
         Acoustics {
             direction: DirectionModel::Head,
             air_absorption: DEFAULT_AIR_ABSORPTION,
+            rear_shadow: DEFAULT_REAR_SHADOW,
         }
     }
 }
 
 pub const DEFAULT_AIR_ABSORPTION: f64 = 0.1;
+/// About 3 dB down at 4 kHz and 7 dB at 8 kHz straight behind (to be tuned by ear).
+pub const DEFAULT_REAR_SHADOW: f64 = 4000.0;
 
 /// Head model constants (to be tuned by ear). Woodworth's ITD for a spherical head: (r / c)(θ + sin θ), up to
 /// 0.66 ms at the side.
@@ -286,19 +302,26 @@ pub fn ears(r: &Rendering, acoustics: &Acoustics) -> [Ear; 2] {
         DirectionModel::Head => {
             // s = sin of the lateral angle (0 ahead or behind, 1 at the side).
             let s = r.pan.abs().min(1.0);
+            // Both ears: air absorption, and the rear shadow easing in from the side to straight behind.
+            let behind = r.behind.min(1.0);
+            let both = if acoustics.rear_shadow > 0.0 && behind > 0.0 {
+                (20000.0 * (acoustics.rear_shadow.min(20000.0) / 20000.0).powf(behind)).min(air)
+            } else {
+                air
+            };
             let near = Ear {
                 gain: r.gain,
                 delay: 0.0,
-                cutoff: air,
+                cutoff: both,
             };
             let lateral = s.asin();
             let far = Ear {
                 gain: r.gain * 10f64.powf(-ILD_SIDE_DB * s / 20.0),
                 delay: HEAD_RADIUS / SPEED_OF_SOUND * (lateral + s),
                 cutoff: if s > 0.0 {
-                    (20000.0 * (SHADOW_SIDE_HZ / 20000.0).powf(s)).min(air)
+                    (20000.0 * (SHADOW_SIDE_HZ / 20000.0).powf(s)).min(both)
                 } else {
-                    air
+                    both
                 },
             };
             if r.pan > 0.0 {
@@ -365,6 +388,7 @@ mod tests {
         let (l, r) = Rendering {
             gain: 1.0,
             pan: 1.0,
+            behind: 0.0,
             distance: 0.0,
         }
         .stereo();
@@ -372,6 +396,7 @@ mod tests {
         let (l, r) = Rendering {
             gain: 0.5,
             pan: -1.0,
+            behind: 0.0,
             distance: 0.0,
         }
         .stereo();
@@ -379,6 +404,7 @@ mod tests {
         let (l, r) = Rendering {
             gain: 1.0,
             pan: 0.5,
+            behind: 0.0,
             distance: 0.0,
         }
         .stereo();
@@ -512,6 +538,7 @@ mod tests {
         let head = Acoustics {
             direction: DirectionModel::Head,
             air_absorption: 0.0,
+            rear_shadow: 0.0,
         };
         // Straight ahead: both ears the same, no delay, no filter.
         let [l, r] = ears(&Rendering::CENTRE, &head);
@@ -523,6 +550,7 @@ mod tests {
             &Rendering {
                 gain: 0.5,
                 pan: 1.0,
+                behind: 0.0,
                 distance: 4.0,
             },
             &head,
@@ -535,17 +563,73 @@ mod tests {
         let pan = Acoustics {
             direction: DirectionModel::Pan,
             air_absorption: 0.0,
+            rear_shadow: 0.0,
         };
         let [l, r] = ears(
             &Rendering {
                 gain: 1.0,
                 pan: 1.0,
+                behind: 0.0,
                 distance: 4.0,
             },
             &pan,
         );
         assert!(l.gain.abs() < 1e-12);
         assert_eq!((r.gain, l.delay, r.delay), (1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn rear_shadow_dulls_sources_behind() {
+        let head = Acoustics {
+            direction: DirectionModel::Head,
+            air_absorption: 0.0,
+            rear_shadow: 4000.0,
+        };
+        let from = |behind: f64| {
+            ears(
+                &Rendering {
+                    gain: 1.0,
+                    pan: 0.0,
+                    behind,
+                    distance: 5.0,
+                },
+                &head,
+            )
+        };
+        // In front: no filter. Straight behind: both ears at 4 kHz. Half way round: in between.
+        assert!(from(0.0)[0].cutoff.is_infinite());
+        let [l, r] = from(1.0);
+        assert_eq!(l, r);
+        assert!((l.cutoff - 4000.0).abs() < 1e-6);
+        let half = from(0.5)[0].cutoff;
+        assert!(half > 4000.0 && half < 20000.0, "{half}");
+        // Off: no filter behind.
+        let off = Acoustics {
+            rear_shadow: 0.0,
+            ..head
+        };
+        assert!(
+            ears(
+                &Rendering {
+                    behind: 1.0,
+                    ..Rendering::CENTRE
+                },
+                &off
+            )[0]
+            .cutoff
+            .is_infinite()
+        );
+    }
+
+    #[test]
+    fn render_tells_behind_from_in_front() {
+        let p = DistanceParams::default();
+        let facing_east = Some(([0.0, 0.0, 0.0], Orientation::default()));
+        let ahead = render(at(5.0, 0.0, 0.0), facing_east, &p);
+        let behind = render(at(-5.0, 0.0, 0.0), facing_east, &p);
+        let left = render(at(0.0, 5.0, 0.0), facing_east, &p);
+        assert_eq!((ahead.behind, behind.behind, left.behind), (0.0, 1.0, 0.0));
+        assert_eq!(ahead.gain, behind.gain);
     }
 
     #[test]
