@@ -20,7 +20,7 @@ use std::sync::Once;
 
 use byte_slice_cast::*;
 
-fn init() {
+pub(super) fn init() {
     static INIT: Once = Once::new();
 
     INIT.call_once(|| {
@@ -251,7 +251,7 @@ fn mixer_direct_link<
         let buffer = sample.buffer().unwrap();
         let map = buffer.map_readable().unwrap();
         let slice = map.as_slice_of::<T>().unwrap();
-        assert_eq!(slice.len(), 480);
+        assert_eq!(slice.len(), 960);
 
         let expected: T = match i {
             0 => values[1] + values[2],
@@ -375,7 +375,7 @@ fn mixer_pads_added_and_removed_while_running() {
             assert_eq!(buffer.pts(), Some(gst::ClockTime::from_mseconds(10 * k)));
             let map = buffer.map_readable().unwrap();
             let slice = map.as_slice_of::<f32>().unwrap();
-            assert_eq!(slice.len(), 480, "round {k}: mix_{n} length");
+            assert_eq!(slice.len(), 960, "round {k}: mix_{n} length");
             let expected = total - value;
             for (j, &s) in slice.iter().enumerate() {
                 assert!(

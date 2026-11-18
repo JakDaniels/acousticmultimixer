@@ -28,12 +28,13 @@ use gst_audio::AudioFormat;
 
 use byte_slice_cast::*;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
-use crate::splitmeta::{OutputChannelSplit, SplitMeta};
-
 const DEFAULT_SAMPLE_RATE: i32 = 48000;
+
+// Every output is stereo: output N is channels 2N and 2N + 1 of the input.
+const OUTPUT_CHANNELS: usize = 2;
 
 #[derive(Debug, Clone, Copy)]
 struct Settings {
@@ -258,7 +259,7 @@ impl ElementImpl for Splitter {
                 &gst_audio::AudioCapsBuilder::new_interleaved()
                     .format_list([gst_audio::AUDIO_FORMAT_S16, gst_audio::AUDIO_FORMAT_F32])
                     .rate_range(1..)
-                    .channels(1) // only support mono for now
+                    .channels(OUTPUT_CHANNELS as i32)
                     .build(),
             )
             .unwrap();
@@ -384,17 +385,8 @@ impl Splitter {
             return Err(gst::FlowError::NotNegotiated);
         };
 
-        // IMPROVE: use vec-collections based on SmallVec perhaps?
-        let mut seen_pads = BTreeSet::from_iter(output_streams.keys().cloned());
-
-        // Retrieve the split meta from the buffer
-        let meta = in_buf
-            .meta::<SplitMeta>()
-            .expect("No split meta on buffer!");
-
         let in_map = in_buf.map_readable().unwrap();
-        let in_slice = in_map.as_slice_of::<f32>().unwrap();
-        let in_samples = &in_slice[0..];
+        let in_samples = in_map.as_slice_of::<f32>().unwrap();
 
         let n_channels_in = audio_info.channels() as usize;
         let bps = std::mem::size_of::<f32>();
@@ -404,39 +396,28 @@ impl Splitter {
         gst::trace!(
             CAT,
             imp = self,
-            "Got buffer with {n_samples} samples, {n_channels_in} input channels, and output split {:?}",
-            meta.output_split(),
+            "Got buffer with {n_samples} samples, {n_channels_in} input channels",
         );
 
-        // The input buffer contains in sequence in memory a list of all ready-made output mixes,
-        // and the OutputChannelSplit in the split meta is basically the map that says how many
-        // channels from which channel offset in the input buffer belong to which output pad/mix.
-        // FIXME: is this correct? ^^^ and interleaved or not interleaved?
-
-        for &OutputChannelSplit {
-            output_num,
-            channel_offset,
-            n_channels,
-        } in meta.output_split()
-        {
-            assert!(channel_offset + n_channels <= n_channels_in); // FIXME
-
-            let Some(output_stream) = output_streams.get_mut(&output_num) else {
-                gst::log!(
+        // The input buffer holds every output's mix side by side (fixed layout): output N is
+        // OUTPUT_CHANNELS channels from channel N × OUTPUT_CHANNELS.
+        for (&output_num, output_stream) in output_streams.iter_mut() {
+            let channel_offset = output_num as usize * OUTPUT_CHANNELS;
+            if channel_offset + OUTPUT_CHANNELS > n_channels_in {
+                gst::warning!(
                     CAT,
                     imp = self,
-                    "No output stream src_{output_num} yet or anymore, skipping"
+                    "No channels for src_{output_num} in a {n_channels_in}-channel input"
                 );
                 continue;
-            };
+            }
 
             if !output_stream.inited() {
-                output_stream.set_up(sink_pad, audio_info, n_channels as i32);
+                output_stream.set_up(sink_pad, audio_info, OUTPUT_CHANNELS as i32);
             }
 
             fn split_output_buf<T: ConvertFromF32>(
                 n_channels_in: usize,
-                n_channels: usize,
                 channel_offset: usize,
                 n_samples: usize,
                 in_samples: &[f32],
@@ -446,17 +427,17 @@ impl Splitter {
 
                 let in_frames = in_samples.chunks_exact(n_channels_in);
 
-                let mut out_buf = gst::Buffer::with_size(n_samples * n_channels * bps).unwrap();
+                let mut out_buf =
+                    gst::Buffer::with_size(n_samples * OUTPUT_CHANNELS * bps).unwrap();
                 let mut_buf = out_buf.get_mut().unwrap();
                 let mut out_map = mut_buf.map_writable().unwrap();
-                let out_slice = out_map.as_mut_slice_of::<T>().unwrap();
-                let out_samples = &mut out_slice[0..];
-                let out_frames = out_samples.chunks_exact_mut(n_channels);
+                let out_samples = out_map.as_mut_slice_of::<T>().unwrap();
+                let (out_frames, _) = out_samples.as_chunks_mut::<OUTPUT_CHANNELS>();
 
                 assert_eq!(out_frames.len(), in_frames.len());
 
-                for (in_frame, out_frame) in Iterator::zip(in_frames, out_frames) {
-                    let in_frame_out_samples = &in_frame[channel_offset..][..n_channels];
+                for (in_frame, out_frame) in Iterator::zip(in_frames, out_frames.iter_mut()) {
+                    let in_frame_out_samples = &in_frame[channel_offset..][..OUTPUT_CHANNELS];
 
                     for (in_sample, out_sample) in
                         Iterator::zip(in_frame_out_samples.iter(), out_frame.iter_mut())
@@ -474,7 +455,6 @@ impl Splitter {
                 let mut out_buf = match output_stream.format.expect("output format") {
                     AudioFormat::F32le | AudioFormat::F32be => split_output_buf::<f32>(
                         n_channels_in,
-                        n_channels,
                         channel_offset,
                         n_samples,
                         in_samples,
@@ -483,7 +463,6 @@ impl Splitter {
 
                     AudioFormat::S16le | AudioFormat::S16be => split_output_buf::<i16>(
                         n_channels_in,
-                        n_channels,
                         channel_offset,
                         n_samples,
                         in_samples,
@@ -495,7 +474,9 @@ impl Splitter {
 
                 let _ = in_buf.copy_into(
                     out_buf.get_mut().unwrap(),
-                    gst::BufferCopyFlags::META | gst::BufferCopyFlags::TIMESTAMPS,
+                    gst::BufferCopyFlags::FLAGS
+                        | gst::BufferCopyFlags::META
+                        | gst::BufferCopyFlags::TIMESTAMPS,
                     ..,
                 );
 
@@ -513,30 +494,6 @@ impl Splitter {
                 obj = out_pad,
                 "flow: {flow:?}, combined flow now: {combined_flow:?}"
             );
-
-            seen_pads.remove(&output_num);
-        }
-
-        // Send GAP events on pads we didn't output anything to
-        if !seen_pads.is_empty() {
-            let gap_event = gst::event::Gap::builder(in_buf.pts().unwrap())
-                .duration(in_buf.duration().unwrap())
-                .build();
-
-            // TODO: maybe only push gap events on output pads that have been set up / configured
-            for pad_num in seen_pads {
-                if let Some(output_stream) = output_streams.get_mut(&pad_num) {
-                    output_stream.pad.push_event(gap_event.clone());
-                    if !output_stream.inited() {
-                        // FIXME: For the mix-minus mixer we know our output is always 1 channel,
-                        // but that's not true for the generic case. We'd need to configure the
-                        // output pads with construct-only properties that define the channel
-                        // mix so we can know the number of output channels here also in the
-                        // generic case.
-                        output_stream.set_up(sink_pad, audio_info, 1);
-                    }
-                }
-            }
         }
 
         // Allow no pads and all output pads unlinked

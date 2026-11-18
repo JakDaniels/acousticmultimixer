@@ -15,62 +15,57 @@
 /**
  * SECTION:element-acousticmultimixer
  *
- * Mix-minus mixer: for each input, an output mix that contains all the other inputs.
+ * Mix-minus mixer with positions: every participant's voice comes in on a "sink_%u" pad, and
+ * what they hear comes out of the matching "mix_%u" pad: everyone else, in stereo, placed by
+ * where they are relative to the listener.
  *
- * Input pads are request pads, and for every new input pad "sink_%u" the element will
- * automatically create a matching "mix_%u" source pad that will contain the mix of all the
- * other inputs, i.e. all inputs except "sink_%u" itself. If there is only one sink pad this
- * will output silence instead.
+ * Each request for "sink_%u" also creates "mix_%u"; releasing "sink_%u" removes both. Pads
+ * can be added and removed at any time. Their number is limited by the construct-only
+ * "max-participants" property (default 32): pads are numbered 0 to max-participants - 1, and
+ * the internal mix is always that wide, so adding or removing a pad never renegotiates. A
+ * participant who only listens never feeds their sink pad; one who only talks leaves their
+ * output unlinked, and it is not mixed.
  *
- * Input pads can be added and removed at runtime at any time. Their number is limited by the
- * construct-only "max-participants" property (default 32): pads are numbered 0 to
- * max-participants - 1, and the internal mix is always that wide, so adding or removing a pad
- * never renegotiates.
+ * Positions and settings are properties of the sink pads: "x", "y", "z" (x east, y north,
+ * z up) and "yaw", "pitch", "roll" in degrees (0 faces +x; yaw turns left, pitch looks up,
+ * roll lowers the right ear); "listener-x" … "listener-roll" to hear from somewhere else
+ * than the voice; "gain" and "mute" for everyone hearing the voice; "trims" for this
+ * listener's own gains for others (e.g. trims,sink_0=0.0,sink_2=0.5). A participant with no
+ * position (none of x … roll ever set) is heard centred at full volume, and hears everyone
+ * that way. Level falls with distance by the element's "distance-model",
+ * "reference-distance", "rolloff" and "max-range"; direction pans with constant power.
+ * Changes are taken once per output buffer and ramp across it, so moving does not click.
  *
  * The sample rate is not negotiated, as this is not possible to do in a race-free manner. It
  * must instead be configured at element creation time via the "sample-rate" construct-only
  * property. The default sample rate is 48kHz.
  *
- * Only mono input is supported for the time being.
- *
- * Both F32 and S16 are supported as input and output audio formats. Different inputs may have
- * different input formats (as long as it's one of the two supported ones), and different outputs
- * can have different output formats (as long as it's one of the two supported ones). The internal
- * mixing is currently always done in F32 format regardless of the negotiated input and output
- * formats.
+ * Inputs are mono, outputs stereo, each F32 or S16 (they may differ); mixing is in F32.
  *
  * All outputs are pushed from one streaming thread, so when more than one output is linked,
  * put a queue after each (as after a tee); otherwise the first sink to preroll blocks the rest.
  *
- * This is gst-plugins-rs's minus1mixer under a new name, with a fixed width; the acoustic modelling comes next
- * (PLAN.md).
+ * Built on gst-plugins-rs's minus1mixer; reflections and reverb come next (PLAN.md).
  *
  * ## Example pipelines
  *
  * |[
- * gst-launch-1.0 acousticmultimixer name=m  \
+ * gst-launch-1.0 acousticmultimixer name=m sink_1::y=4 sink_2::x=8 \
  *   audiotestsrc freq=440 ! m.sink_0 \
  *   audiotestsrc wave=ticks ! m.sink_1 \
  *   audiotestsrc freq=220 ! m.sink_2  \
  *   m.mix_0 ! audioconvert ! autoaudiosink
- * ]| This should play back the mix of inputs 1 and 2 (ticks and 220Hz sine wave).
- *
- * |[
- * gst-launch-1.0 acousticmultimixer name=m  \
- *   audiotestsrc freq=440 ! m.sink_0 \
- *   audiotestsrc wave=ticks ! m.sink_1 \
- *   audiotestsrc freq=220 ! m.sink_2  \
- *   m.mix_1 ! audioconvert ! autoaudiosink
- * ]| This should play back the mix of inputs 0 and 2 (440Hz and 220Hz sine waves).
+ * ]| What participant 0 hears, at the origin facing +x: the ticks 4 m to the left, the 220 Hz
+ * tone 8 m ahead and quieter.
  */
 use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;
 
-use std::num::NonZeroU32;
 use std::sync::{Arc, LazyLock, Mutex};
 
-use crate::mixer::{OutputConfiguration, OutputMix};
+use crate::scene::Scene;
+use crate::spatial::{DistanceModel, DistanceParams};
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
@@ -116,6 +111,8 @@ struct State {
     streams: Vec<u32>,
     // fixed number of outputs (max-participants)
     max_participants: u32,
+    // participants and their settings, shared with the pads and the mixer
+    scene: Arc<Mutex<Scene>>,
 }
 
 #[derive(Default)]
@@ -124,13 +121,34 @@ pub struct AcousticMultiMixer {
     settings: Mutex<Settings>,
 }
 
-impl AcousticMultiMixer {}
-
 #[glib::object_subclass]
 impl ObjectSubclass for AcousticMultiMixer {
     const NAME: &'static str = "GstAcousticMultiMixer";
     type Type = super::AcousticMultiMixer;
     type ParentType = gst::Bin;
+    type Interfaces = (gst::ChildProxy,);
+}
+
+// The children are the sink pads (not the internal elements, as for a plain bin), so that
+// gst-launch can set pad properties as with compositor: acousticmultimixer sink_0::x=2.
+impl ChildProxyImpl for AcousticMultiMixer {
+    fn child_by_name(&self, name: &str) -> Option<glib::Object> {
+        self.obj()
+            .static_pad(name)
+            .filter(|pad| pad.direction() == gst::PadDirection::Sink)
+            .map(|pad| pad.upcast())
+    }
+
+    fn child_by_index(&self, index: u32) -> Option<glib::Object> {
+        self.obj()
+            .sink_pads()
+            .get(index as usize)
+            .map(|pad| pad.clone().upcast())
+    }
+
+    fn children_count(&self) -> u32 {
+        self.obj().num_sink_pads() as u32
+    }
 }
 
 impl BinImpl for AcousticMultiMixer {}
@@ -153,6 +171,9 @@ impl ObjectImpl for AcousticMultiMixer {
 
         obj.add(&mixer_element).unwrap();
         obj.add(&splitter).unwrap();
+
+        let scene = Arc::new(Mutex::new(Scene::new(settings.max_participants as usize)));
+        mixer_element.imp().set_scene(scene.clone());
 
         mixer_element.link(&splitter).unwrap();
 
@@ -178,10 +199,8 @@ impl ObjectImpl for AcousticMultiMixer {
             splitter: splitter.into(),
             streams: vec![],
             max_participants: settings.max_participants,
+            scene,
         };
-
-        // Every output exists in the mixer from the start, so its width is set before it runs.
-        self.update_output_config(&state);
 
         *state_guard = Some(state);
     }
@@ -206,6 +225,39 @@ impl ObjectImpl for AcousticMultiMixer {
                     .maximum(MAX_MAX_PARTICIPANTS)
                     .default_value(DEFAULT_MAX_PARTICIPANTS)
                     .construct_only()
+                    .build(),
+
+                glib::ParamSpecEnum::builder_with_default("distance-model", DistanceParams::default().model)
+                    .nick("Distance model")
+                    .blurb("How volume falls with distance beyond reference-distance")
+                    .mutable_playing()
+                    .build(),
+
+                glib::ParamSpecDouble::builder("reference-distance")
+                    .nick("Reference distance")
+                    .blurb("Voices this close or closer are heard at full volume")
+                    .minimum(0.0)
+                    .maximum(1e9)
+                    .default_value(DistanceParams::default().reference)
+                    .mutable_playing()
+                    .build(),
+
+                glib::ParamSpecDouble::builder("rolloff")
+                    .nick("Rolloff")
+                    .blurb("How fast volume falls beyond reference-distance (see distance-model)")
+                    .minimum(0.0)
+                    .maximum(1e3)
+                    .default_value(DistanceParams::default().rolloff)
+                    .mutable_playing()
+                    .build(),
+
+                glib::ParamSpecDouble::builder("max-range")
+                    .nick("Maximum range")
+                    .blurb("Voices further away than this are silent")
+                    .minimum(0.0)
+                    .maximum(1e9)
+                    .default_value(DistanceParams::default().max_range)
+                    .mutable_playing()
                     .build(),
 
                 // AudioAggregator properties we proxy for convenience and discoverability
@@ -313,6 +365,20 @@ impl ObjectImpl for AcousticMultiMixer {
                 settings.max_participants = value.get::<u32>().unwrap();
             }
 
+            "distance-model" | "reference-distance" | "rolloff" | "max-range" => {
+                let state_guard = self.state.lock().unwrap();
+                let state = state_guard.as_ref().expect("state");
+                let mut scene = state.scene.lock().unwrap();
+                let params = &mut scene.params;
+                match pspec.name() {
+                    "distance-model" => params.model = value.get::<DistanceModel>().unwrap(),
+                    "reference-distance" => params.reference = value.get().unwrap(),
+                    "rolloff" => params.rolloff = value.get().unwrap(),
+                    _ => params.max_range = value.get().unwrap(),
+                }
+                scene.dirty = true;
+            }
+
             "force-live" => {
                 let mut settings = self.settings.lock().unwrap();
                 settings.force_live = value.get::<bool>().unwrap();
@@ -349,6 +415,18 @@ impl ObjectImpl for AcousticMultiMixer {
                 settings.max_participants.to_value()
             }
 
+            "distance-model" | "reference-distance" | "rolloff" | "max-range" => {
+                let state_guard = self.state.lock().unwrap();
+                let state = state_guard.as_ref().expect("state");
+                let params = state.scene.lock().unwrap().params;
+                match pspec.name() {
+                    "distance-model" => params.model.to_value(),
+                    "reference-distance" => params.reference.to_value(),
+                    "rolloff" => params.rolloff.to_value(),
+                    _ => params.max_range.to_value(),
+                }
+            }
+
             "force-live" => {
                 let settings = self.settings.lock().unwrap();
                 settings.force_live.to_value()
@@ -382,7 +460,7 @@ impl ElementImpl for AcousticMultiMixer {
             gst::subclass::ElementMetadata::new(
                 "Acoustic Multi Mixer",
                 "Audio/Mixer",
-                "Mix-minus mixer: every input gets an output with all the other inputs mixed",
+                "Mix-minus mixer with positions: every participant hears everyone else in stereo, by distance and direction",
                 "Simon Annetts/Jak Daniels, Tim-Philipp Müller <tim@centricular.com>",
             )
         });
@@ -395,22 +473,29 @@ impl ElementImpl for AcousticMultiMixer {
             let caps = gst_audio::AudioCapsBuilder::new_interleaved()
                 .format_list([gst_audio::AUDIO_FORMAT_S16, gst_audio::AUDIO_FORMAT_F32])
                 .rate_range(1..)
-                .channels(1) // only support mono for now
+                .channels(1) // mono voices
                 .build();
 
-            let sink_pad_template = gst::PadTemplate::new(
+            let sink_pad_template = gst::PadTemplate::with_gtype(
                 "sink_%u",
                 gst::PadDirection::Sink,
                 gst::PadPresence::Request,
                 &caps,
+                crate::AcousticMultiMixerPad::static_type(),
             )
             .unwrap();
+
+            let stereo_caps = gst_audio::AudioCapsBuilder::new_interleaved()
+                .format_list([gst_audio::AUDIO_FORMAT_S16, gst_audio::AUDIO_FORMAT_F32])
+                .rate_range(1..)
+                .channels(2)
+                .build();
 
             let src_pad_template = gst::PadTemplate::new(
                 "mix_%u",
                 gst::PadDirection::Src,
                 gst::PadPresence::Sometimes,
-                &caps,
+                &stereo_caps,
             )
             .unwrap();
 
@@ -456,10 +541,12 @@ impl ElementImpl for AcousticMultiMixer {
                 .mixer_element
                 .request_pad(&mixer_templ, Some(&format!("sink_{n}")), caps)?;
 
-        let new_sink_pad = gst::GhostPad::builder_from_template_with_target(templ, &mixer_pad)
+        let new_sink_pad = gst::PadBuilder::<crate::AcousticMultiMixerPad>::from_template(templ)
+            .name(format!("sink_{n}"))
+            .with_target(&mixer_pad)
             .unwrap()
-            .name(mixer_pad.name())
             .build();
+        new_sink_pad.imp().attach(state.scene.clone(), n as usize);
 
         self.obj().add_pad(&new_sink_pad).unwrap();
         new_sink_pad.set_active(true).unwrap();
@@ -477,8 +564,18 @@ impl ElementImpl for AcousticMultiMixer {
             .unwrap()
             .name(format!("mix_{n}"))
             .build();
+        // Only linked outputs are mixed (an unlinked one is a participant who only talks).
+        let scene = state.scene.clone();
+        mix_pad.connect_linked(move |_, _| {
+            scene.lock().unwrap().set_listening(n as usize, true);
+        });
+        let scene = state.scene.clone();
+        mix_pad.connect_unlinked(move |_, _| {
+            scene.lock().unwrap().set_listening(n as usize, false);
+        });
+
         self.obj().add_pad(&mix_pad).unwrap();
-        new_sink_pad.set_active(true).unwrap();
+        mix_pad.set_active(true).unwrap();
 
         gst::info!(
             CAT,
@@ -489,8 +586,10 @@ impl ElementImpl for AcousticMultiMixer {
         );
 
         state.streams.push(n);
+        state.scene.lock().unwrap().join(n as usize);
+        drop(state_guard);
 
-        self.update_output_config(state);
+        self.obj().child_added(&new_sink_pad, &new_sink_pad.name());
 
         Some(new_sink_pad.upcast())
     }
@@ -542,51 +641,9 @@ impl ElementImpl for AcousticMultiMixer {
 
         // Wasteful since we continue after we found the value, but we have small lengths
         state.streams.retain(|&val| val != n);
+        state.scene.lock().unwrap().leave(n as usize);
+        drop(state_guard);
 
-        self.update_output_config(state);
-    }
-}
-
-impl AcousticMultiMixer {
-    fn update_output_config(&self, state: &State) {
-        let mut output_config = OutputConfiguration::default();
-
-        // Every output, used or not, keeps its place (fixed width); unused ones get nothing.
-        for output_num in 0..state.max_participants {
-            let mut output_mix = OutputMix::new(output_num, NonZeroU32::new(1).unwrap());
-
-            if state.streams.contains(&output_num) {
-                for &input_num in &state.streams {
-                    if input_num != output_num {
-                        output_mix.add_mono_contribution(input_num);
-                    }
-                }
-            }
-
-            output_config.add_output_mix(output_mix);
-        }
-
-        gst::info!(CAT, imp = self, "New output config: {:?}", &output_config,);
-
-        for &input_num in &state.streams {
-            for c in 0..1 {
-                // FIXME: always mono for now
-                gst::info!(
-                    CAT,
-                    imp = self,
-                    "output config for input {input_num} channel {c}: {:?}",
-                    output_config.get_output_contributions_for_input_channel(input_num, c)
-                );
-            }
-        }
-
-        let mixer_element = state
-            .mixer_element
-            .downcast_ref::<super::MultiMixerElement>()
-            .unwrap();
-
-        mixer_element
-            .imp()
-            .set_output_config(mixer_element, output_config);
+        self.obj().child_removed(pad, &pad.name());
     }
 }

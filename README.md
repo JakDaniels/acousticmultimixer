@@ -7,9 +7,10 @@ shared virtual space by distance and direction, with early reflections and a sha
 being built for [SpatialAudioServer](https://github.com/JakDaniels/SpatialAudioServer), an audio conferencing server
 (MCU) with spatial audio, and is meant to be useful to any GStreamer application.
 
-**Status:** under development. For now it is a plain mix-minus mixer (every output hears all the other inputs);
-the acoustics come next. The plan and the decisions: [PLAN.md](PLAN.md); the original
-design: [docs/design.md](docs/design.md); what changed: [CHANGELOG.md](CHANGELOG.md).
+**Status:** under development. Working now: mix-minus in stereo, with level by distance and pan by direction
+(SpatialAudioServer's formulas), per-person gain, mute and trims. Next: direction cues, reflections and reverb.
+The plan and the decisions: [PLAN.md](PLAN.md); the original design: [docs/design.md](docs/design.md); what
+changed: [CHANGELOG.md](CHANGELOG.md).
 
 ## Building
 
@@ -25,15 +26,18 @@ cargo test
 ## Example
 
 ```bash
-gst-launch-1.0 acousticmultimixer name=m \
+gst-launch-1.0 acousticmultimixer name=m sink_1::y=4 sink_2::x=8 \
   audiotestsrc freq=440 ! m.sink_0 \
   audiotestsrc wave=ticks ! m.sink_1 \
   audiotestsrc freq=220 ! m.sink_2 \
-  m.mix_0 ! audioconvert ! autoaudiosink      # ticks and 220 Hz: everyone but sink_0
+  m.mix_0 ! audioconvert ! autoaudiosink
 ```
 
-Inputs are `sink_0` to `sink_31` (`max-participants`, default 32); each has its own output `mix_N`. When more than
-one output is linked, put a `queue` after each.
+What participant 0 hears, at the origin facing east (+x): the ticks 4 m to the left, the 220 Hz tone 8 m ahead.
+Inputs are `sink_0` to `sink_31` (`max-participants`, default 32), each with its own stereo output `mix_N`; with
+more than one output linked, put a `queue` after each. `gst-inspect-1.0 acousticmultimixer` lists the
+element's properties; the pad properties (`x`, `y`, `z`, `yaw`, `pitch`, `roll`, `listener-*`, `gain`, `mute`,
+`trims`) are described in [PLAN.md](PLAN.md#3-the-elements-interface).
 
 ## Licence
 

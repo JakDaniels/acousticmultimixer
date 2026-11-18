@@ -14,7 +14,9 @@ use gst::prelude::*;
 
 mod acousticmultimixer;
 mod mixer;
-mod splitmeta;
+mod pad;
+mod scene;
+mod spatial;
 mod splitter;
 
 glib::wrapper! {
@@ -22,7 +24,11 @@ glib::wrapper! {
 }
 
 glib::wrapper! {
-    pub struct AcousticMultiMixer(ObjectSubclass<acousticmultimixer::AcousticMultiMixer>) @extends gst::Bin, gst::Element, gst::Object;
+    pub struct AcousticMultiMixer(ObjectSubclass<acousticmultimixer::AcousticMultiMixer>) @extends gst::Bin, gst::Element, gst::Object, @implements gst::ChildProxy;
+}
+
+glib::wrapper! {
+    pub struct AcousticMultiMixerPad(ObjectSubclass<pad::SinkPad>) @extends gst::GhostPad, gst::ProxyPad, gst::Pad, gst::Object;
 }
 
 glib::wrapper! {
@@ -30,7 +36,11 @@ glib::wrapper! {
 }
 
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
-    // The mixer and the splitter stay internal to the bin.
+    // The mixer and the splitter stay internal to the bin; the pad type and the distance model enum are part
+    // of its interface.
+    AcousticMultiMixerPad::static_type().mark_as_plugin_api(gst::PluginAPIFlags::empty());
+    spatial::DistanceModel::static_type().mark_as_plugin_api(gst::PluginAPIFlags::empty());
+
     gst::Element::register(
         Some(plugin),
         "acousticmultimixer",

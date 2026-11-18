@@ -13,42 +13,16 @@
 // SPDX-License-Identifier: MPL-2.0
 
 // ---------------------------------------------------------------------------
-// Internal AudioAggregator-based mixer element that creates output buffers
-// containing all the output channels for all outputs as per the per-output
-// mix specification.
+// Internal AudioAggregator-based mixer element. Its output buffer holds every
+// participant's stereo mix side by side: participant N's left and right are
+// channels 2N and 2N + 1, for N from 0 to max-participants - 1 (a fixed width,
+// so nothing renegotiates when participants come and go). The internal splitter
+// then sends each pair to its own output.
 //
-// A separate internal splitter element will then split these buffers and send
-// only the relevant channels to each output.
-//
-//
-// +---------------------------- outputs ------------------------------------+
-// |               src_00   src_01   src_02
-// |               ch0 ch1  ch0 ch1  ch0 ch1
-// |
-// | sink_00 ch0   0.0 0.0  0.5 0.0  0.5 0.0
-// |         ch1   0.0 0.0  0.0 0.5  0.0 0.5
-// |
-// | sink_01 ch0   0.5 0.0  0.0 0.0  0.5 0.0
-// |         ch1   0.0 0.5  0.0 0.0  0.0 0.5
-// |
-// | sink_02 ch0   0.5 0.0  0.5 0.0  0.0 0.0
-// |         ch1   0.0 0.5  0.0 0.5  0.0 0.0
-// |
-// i sink_03 ch0   0.0 0.0  0.0 0.0  0.0 0.0
-// n         ch1   0.0 0.0  0.0 0.0  0.0 0.0
-// p
-// u
-// t
-// s
-//
-// |
-// |
-// +
-//
-// mix_00,
-//   channel_0=(structure)channel-mix,sink_01c0=1.0,sink_02c0=1.0,
-//   channel_1=(structure)channel-mix,sink_01c1=1.0,sink_02c1=1.0,
-//
+// Each input adds into every output that hears it, with a left and a right
+// gain per (speaker, listener) path taken from the scene (scene.rs). Gains are
+// recomputed at most once per output buffer, when something changed, and a
+// changed path ramps linearly across that buffer to its new value.
 // ---------------------------------------------------------------------------
 
 use gst::glib;
@@ -58,118 +32,91 @@ use gst_audio::AudioFormat;
 use gst_audio::prelude::*;
 use gst_audio::subclass::prelude::*;
 
-use std::iter::zip;
-use std::num::NonZeroU32;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use byte_slice_cast::*;
 
-use crate::splitmeta::{OutputChannelSplit, SplitMeta};
+use crate::scene::Scene;
 
-#[derive(Debug)]
-pub struct MixContribution {
-    input: u32,
-    channel: u32,
+/// The gains for the output buffer being made: per speaker (row), `width` values (listener l's pair at 2l).
+#[derive(Default)]
+struct Gains {
+    width: usize,
+    /// At the start of the output buffer.
+    start: Vec<f32>,
+    /// At its end; equal to `start` unless something changed.
+    end: Vec<f32>,
+    /// (end - start) / frames, for rows that ramp.
+    step: Vec<f32>,
+    /// Per row: does it ramp in this buffer, and the range of columns that are not silent (lo..hi; empty when the
+    /// speaker is heard by nobody, so its input is skipped).
+    ramping: Vec<bool>,
+    span: Vec<(usize, usize)>,
 }
 
-#[derive(Debug)]
-pub struct OutputChannelContributions {
-    contributions: Vec<MixContribution>,
-}
-
-impl OutputChannelContributions {
-    fn new() -> Self {
-        Self {
-            contributions: vec![],
+impl Gains {
+    fn new(rows: usize, width: usize) -> Self {
+        Gains {
+            width,
+            start: vec![0.0; rows * width],
+            end: vec![0.0; rows * width],
+            step: vec![0.0; rows * width],
+            ramping: vec![false; rows],
+            span: vec![(0, 0); rows],
         }
     }
 
-    fn clear(&mut self) {
-        self.contributions.clear();
-    }
-
-    #[allow(dead_code)]
-    fn remove_contributions_for_input(&mut self, input: u32) {
-        self.contributions
-            .retain(|contribution| contribution.input != input);
-    }
-
-    fn add_contribution(&mut self, input: u32, channel: u32) {
-        // If we already have an existing contribution entry, update that
-        for contribution in &mut self.contributions {
-            if contribution.input == input && contribution.channel == channel {
+    /// Moves on to a new output buffer of `frames` frames: the last buffer's end is this one's start, then the
+    /// scene's gains (if they changed) are this one's end.
+    fn next_buffer(&mut self, scene: &Mutex<Scene>, frames: usize) {
+        let was_ramping = self.ramping.iter().any(|&r| r);
+        let fresh = {
+            let mut scene = scene.lock().unwrap();
+            if !scene.dirty && !was_ramping {
+                // Nothing changed: start and end are already equal.
                 return;
             }
-        }
-        self.contributions.push(MixContribution { input, channel });
-    }
-}
+            self.start.copy_from_slice(&self.end);
+            if scene.dirty {
+                scene.compute(&mut self.end)
+            } else {
+                // Ramps just ended: no ramps now, and the spans may be narrower.
+                vec![]
+            }
+        };
 
-#[derive(Debug)]
-pub struct OutputMix {
-    // Output pad number
-    output_num: u32,
-
-    channels: Vec<OutputChannelContributions>,
-}
-
-impl OutputMix {
-    pub(crate) fn new(output_num: u32, n_channels: NonZeroU32) -> Self {
-        let n_channels = n_channels.get();
-
-        let mut channels = Vec::with_capacity(n_channels as usize);
-        for _ in 0..n_channels {
-            channels.push(OutputChannelContributions::new());
-        }
-
-        Self {
-            output_num,
-            channels,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn clear(&mut self) {
-        for channel in &mut self.channels {
-            channel.clear();
-        }
-    }
-
-    pub(crate) fn add_mono_contribution(&mut self, input: u32) {
-        self.channels[0].add_contribution(input, 0);
-    }
-
-    // Can probably make this nicer, and/or more generic, but for now everything is stereo
-    #[allow(dead_code)]
-    pub(crate) fn add_stereo_contribution(&mut self, input: u32) {
-        self.channels[0].add_contribution(input, 0);
-        self.channels[1].add_contribution(input, 1);
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn n_contributions(&self) -> usize {
-        self.channels
-            .iter()
-            .map(|output_channel_contribution| output_channel_contribution.contributions.len())
-            .max()
-            .unwrap_or(0)
-    }
-}
-
-#[derive(Default, Debug)]
-pub struct OutputConfiguration {
-    outputs: Vec<OutputMix>,
-}
-
-impl OutputConfiguration {
-    pub(crate) fn add_output_mix(&mut self, mix: OutputMix) {
-        for output in &mut self.outputs {
-            if output.output_num == mix.output_num {
-                *output = mix;
-                return;
+        // New speakers and new listeners start at their gains: there is nothing to click from.
+        let width = self.width;
+        for &n in &fresh {
+            let (s, e) = (
+                &mut self.start[n * width..][..width],
+                &self.end[n * width..][..width],
+            );
+            s.copy_from_slice(e);
+            for row in 0..self.ramping.len() {
+                for c in [2 * n, 2 * n + 1] {
+                    self.start[row * width + c] = self.end[row * width + c];
+                }
             }
         }
-        self.outputs.push(mix);
+
+        let inv_frames = 1.0 / frames.max(1) as f32;
+        for row in 0..self.ramping.len() {
+            let range = row * width..(row + 1) * width;
+            let (start, end) = (&self.start[range.clone()], &self.end[range.clone()]);
+            let ramping = start != end;
+            self.ramping[row] = ramping;
+            if ramping {
+                for ((d, &a), &b) in self.step[range].iter_mut().zip(start).zip(end) {
+                    *d = (b - a) * inv_frames;
+                }
+            }
+            let audible = |c: usize| start[c] != 0.0 || end[c] != 0.0;
+            self.span[row] = match (0..width).find(|&c| audible(c)) {
+                Some(lo) => (lo, (lo..width).rfind(|&c| audible(c)).unwrap() + 1),
+                None => (0, 0),
+            };
+        }
     }
 }
 
@@ -179,43 +126,12 @@ struct State {
     // of all sink pads as well as the srcpad caps
     configured_info: Option<gst_audio::AudioInfo>,
 
-    output_config: OutputConfiguration,
+    scene: Option<Arc<Mutex<Scene>>>,
 
-    pending_config: Option<OutputConfiguration>,
-}
+    gains: Gains,
 
-impl OutputConfiguration {
-    fn n_output_channels(&self) -> usize {
-        self.outputs
-            .iter()
-            .fold(0, |acc, output| acc + output.channels.len())
-    }
-
-    // IMPROVE: maybe use SmallVec? or perhaps we could rewrite this as an iterator?
-    pub(crate) fn get_output_contributions_for_input_channel(
-        &self,
-        input: u32,
-        channel: u32,
-    ) -> Vec<bool> {
-        let out_channels = self.n_output_channels();
-
-        let mut out_contribs = vec![false; out_channels];
-
-        let mut i = 0; // output channel index (in output buffer, across all outputs)
-
-        for out_mix in &self.outputs {
-            for out_chan in &out_mix.channels {
-                for mix_contrib in &out_chan.contributions {
-                    if mix_contrib.input == input && mix_contrib.channel == channel {
-                        out_contribs[i] = true;
-                    }
-                }
-                i += 1;
-            }
-        }
-
-        out_contribs
-    }
+    // Frames in the output buffer being made (for the ramps).
+    frames: usize,
 }
 
 #[derive(Default)]
@@ -449,16 +365,12 @@ impl AggregatorImpl for MultiMixerElement {
     }
 
     fn negotiate(&self) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let state = self.state.lock().unwrap();
 
-        if let Some(pending_config) = state.pending_config.take() {
-            gst::info!(CAT, imp = self, "updating config to: {:?}", pending_config);
-            state.output_config = pending_config;
-        }
-
-        let out_channels = state.output_config.n_output_channels() as i32;
-
-        gst::info!(CAT, imp = self, "out_channels: {}", out_channels);
+        let Some(width) = state.scene.as_ref().map(|s| s.lock().unwrap().width()) else {
+            gst::error!(CAT, imp = self, "No scene");
+            return false;
+        };
 
         // We require the same caps on every sinkpad so just take the caps of the first
         // sinkpad and update those for the srcpad
@@ -473,9 +385,7 @@ impl AggregatorImpl for MultiMixerElement {
         };
 
         let mut_ref = output_caps.get_mut().unwrap();
-        // out_channels could be 0 in case of force-live=true and there are no inputs yet,
-        // and while we could handle that fine the audio aggregator base class does not.
-        mut_ref.set("channels", std::cmp::max(1, out_channels));
+        mut_ref.set("channels", width as i32);
         mut_ref.set("channel-mask", gst::Bitmask::new(0));
         // Our internal mixing format is always f32
         mut_ref.set("format", gst_audio::AUDIO_FORMAT_F32.to_str());
@@ -484,15 +394,12 @@ impl AggregatorImpl for MultiMixerElement {
 
         gst::debug!(CAT, imp = self, "Setting caps {output_caps:?}");
 
-        // The output width is fixed (the bin's max-participants), so this runs once, before the first
-        // output buffer, and never while one is pending: none of the upstream minus1mixer's
+        // The output width is fixed (the bin's max-participants), so the caps never change once set:
+        // when this runs again (an output was linked), negotiated_src_caps sees equal caps and does
+        // nothing, so a pending output buffer is never disturbed. None of the upstream minus1mixer's
         // AudioAggregator workarounds are needed.
         if self.parent_negotiated_src_caps(&output_caps).is_ok() {
             self.obj().set_src_caps(&output_caps);
-
-            // TODO: Should also call self.prepare_allocator() here now, needs
-            // https://gitlab.freedesktop.org/gstreamer/gstreamer/-/merge_requests/11425
-
             true
         } else {
             false
@@ -501,35 +408,20 @@ impl AggregatorImpl for MultiMixerElement {
 }
 
 impl AudioAggregatorImpl for MultiMixerElement {
-    // This will be called before any of the buffer aggregation (mixing) happens,
-    // but after any re-negotiation was processed and new pending output config
-    // applied in Aggregator::update_src_caps(), so the config is current here.
+    // Called before any of the mixing into a new output buffer.
     fn create_output_buffer(&self, num_frames: u32) -> Option<gst::Buffer> {
-        let mut buf = self.parent_create_output_buffer(num_frames)?;
+        let buf = self.parent_create_output_buffer(num_frames)?;
 
-        let state = self.state.lock().unwrap();
-
-        let mut output_split = vec![];
-        let mut channel_offset = 0;
-
-        for output in &state.output_config.outputs {
-            let n_channels = output.channels.len();
-
-            output_split.push(OutputChannelSplit::new(
-                output.output_num,
-                channel_offset,
-                n_channels,
-            ));
-
-            channel_offset += n_channels;
+        let mut state = self.state.lock().unwrap();
+        let state = &mut *state;
+        state.frames = num_frames as usize;
+        if let Some(scene) = &state.scene {
+            state.gains.next_buffer(scene, state.frames);
         }
-
-        SplitMeta::add(buf.get_mut().unwrap(), output_split);
 
         Some(buf)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn aggregate_one_buffer(
         &self,
         pad: &gst_audio::AudioAggregatorPad,
@@ -540,139 +432,64 @@ impl AudioAggregatorImpl for MultiMixerElement {
         num_frames: u32,
     ) -> bool {
         let state = self.state.lock().unwrap();
+        let gains = &state.gains;
+        let width = gains.width;
 
-        let audio_info = pad.audio_info().expect("audioinfo");
-
-        let in_channels = audio_info.channels() as usize;
-        let out_channels = state.output_config.n_output_channels();
-
-        // Add assert to help compiler optimise loops below.
-        // TODO: would be nice to support stereo too.
-        assert_eq!(in_channels, 1);
-
-        // in_offset and out_offset are in "frames", which is the size of a sample times
-        // the number of channels. This means we need to multiply by number of channels to
-        // get to the right offset in frames if have a flat array of audio samples in memory.
-        let in_offset = in_offset as usize * in_channels;
-        let out_offset = out_offset as usize * out_channels;
-        let num_frames = num_frames as usize;
-
-        let n = pad
+        let Some(n) = pad
             .name()
             .strip_prefix("sink_")
-            .unwrap()
-            .parse::<u32>()
-            .unwrap();
+            .and_then(|n| n.parse::<usize>().ok())
+            .filter(|&n| n < gains.span.len())
+        else {
+            return true;
+        };
+
+        // Heard by nobody (muted, out of range, alone, nobody listening): nothing to do.
+        let (lo, hi) = gains.span[n];
+        if lo == hi {
+            return true;
+        }
+
+        let audio_info = pad.audio_info().expect("audioinfo");
+        assert_eq!(audio_info.channels(), 1);
+
+        let row = n * width..(n + 1) * width;
+        let start = &gains.start[row.clone()][lo..hi];
+        let step = gains.ramping[n].then(|| &gains.step[row][lo..hi]);
+        let in_offset = in_offset as usize;
+        let out_offset = out_offset as usize;
+        let num_frames = num_frames as usize;
 
         gst::log!(
             CAT,
             imp = self,
-            "Aggregation time! \
-            input {n} in_offset: {in_offset}, \
-            out_offset: {out_offset}, num_frames: {num_frames}, \
-            out_chans: {out_channels}"
+            "input {n}: frames {num_frames} from {in_offset} to {out_offset}, columns {lo}..{hi}, ramping {}",
+            step.is_some()
         );
 
-        #[allow(clippy::too_many_arguments)]
-        fn mix_one_buffer<T: byte_slice_cast::FromByteSlice + Copy>(
-            imp: &MultiMixerElement,
-            output_config: &OutputConfiguration,
-            n: u32,
-            conv_scale: f32,
-            inbuf: &gst::BufferRef,
-            in_channels: usize,
-            in_offset: usize,
-            outbuf: &mut gst::BufferRef,
-            out_channels: usize,
-            out_offset: usize,
-            num_frames: usize,
-        ) where
-            f32: From<T>,
-        {
-            let in_map = inbuf.map_readable().unwrap();
-            let in_slice = in_map.as_slice_of::<T>().unwrap();
-
-            let in_samples = &in_slice[in_offset..];
-            let mut in_frames = in_samples.chunks_exact(in_channels);
-
-            // Our internal mixing format is always f32
-            let mut out_map = outbuf.map_writable().unwrap();
-            let out_slice = out_map.as_mut_slice_of::<f32>().unwrap();
-            let out_samples = &mut out_slice[out_offset..];
-            let mut out_frames = out_samples.chunks_exact_mut(out_channels);
-
-            assert!(in_frames.len() >= num_frames);
-            assert!(out_frames.len() >= num_frames);
-
-            // We're processing one input here in this aggregate_one function.
-            //
-            // Each channel of this input may contribute to one or more output mixes,
-            // which are all contained one after another in the output buffer.
-            for ch in 0..in_channels {
-                // Get Vec<bool> containing the contribution (yes/no) of this input's input channel
-                // for each output channel in the output buffer.
-                let out_contribs =
-                    output_config.get_output_contributions_for_input_channel(n, ch as u32);
-
-                gst::log!(
-                    CAT,
-                    imp = imp,
-                    "  input {n} ch{ch} contribs: {:?}",
-                    out_contribs
-                );
-
-                assert_eq!(out_contribs.len(), out_channels);
-
-                // Step through input and output buffer one sample frame at a time.
-                //
-                // Input and output frames will likely have different number of channels,
-                // since the output buffer contains all channels for all output mixes.
-                //
-                for (out_frame, in_frame) in zip(&mut out_frames, &mut in_frames).take(num_frames) {
-                    // We're only interested in mixing this one particular input sample of our input
-                    // frame, the other channels will be handled in the next outer loop iteration.
-                    let in_sample = f32::from(in_frame[ch]) / conv_scale;
-
-                    // Step through all channels of all output mixes in the output buffer,
-                    // and add this sample's contribution to the output samples.
-                    for (sample, &contrib) in zip(out_frame.iter_mut(), &out_contribs) {
-                        if contrib {
-                            *sample += in_sample;
-                        }
-                    }
-                }
-            }
-        }
+        let mut out_map = outbuf.map_writable().unwrap();
+        let out = out_map.as_mut_slice_of::<f32>().unwrap();
+        let out = &mut out[out_offset * width..][..num_frames * width];
+        let in_map = inbuf.map_readable().unwrap();
 
         match audio_info.format() {
-            AudioFormat::F32le => mix_one_buffer::<f32>(
-                self,
-                &state.output_config,
-                n,
-                1.0,
-                inbuf,
-                in_channels,
-                in_offset,
-                outbuf,
-                out_channels,
-                out_offset,
-                num_frames,
-            ),
-
-            AudioFormat::S16le => mix_one_buffer::<i16>(
-                self,
-                &state.output_config,
-                n,
-                32768.0,
-                inbuf,
-                in_channels,
-                in_offset,
-                outbuf,
-                out_channels,
-                out_offset,
-                num_frames,
-            ),
-
+            AudioFormat::F32le => {
+                let input = &in_map.as_slice_of::<f32>().unwrap()[in_offset..][..num_frames];
+                mix(input, 1.0, out, width, lo, start, step, out_offset);
+            }
+            AudioFormat::S16le => {
+                let input = &in_map.as_slice_of::<i16>().unwrap()[in_offset..][..num_frames];
+                mix(
+                    input,
+                    1.0 / 32768.0,
+                    out,
+                    width,
+                    lo,
+                    start,
+                    step,
+                    out_offset,
+                );
+            }
             format => unimplemented!("{format:?}"),
         }
 
@@ -680,29 +497,55 @@ impl AudioAggregatorImpl for MultiMixerElement {
     }
 }
 
-impl MultiMixerElement {
-    pub(crate) fn set_output_config(
-        &self,
-        element: &super::MultiMixerElement,
-        config: OutputConfiguration,
-    ) {
-        let mut state = self.state.lock().unwrap();
-
-        // Same width as now (the usual case: the bin's outputs are fixed): use it from the next
-        // output buffer on, with no renegotiation.
-        if state.pending_config.is_none()
-            && config.n_output_channels() == state.output_config.n_output_channels()
-        {
-            gst::info!(CAT, obj = element, "new config: {:?}", config);
-            state.output_config = config;
-            return;
+/// Adds one mono input into the output frames: for each sample x, columns lo..lo + start.len() of the frame get
+/// x × gain. The gains are `start`, or ramp as start + step × (k + 1) at output-buffer frame k (`first` is the
+/// first frame's index), reaching the end value on the buffer's last frame. Plain slices with no branches per
+/// sample, so the compiler vectorises the inner loops.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn mix<T: Copy>(
+    input: &[T],
+    scale: f32,
+    out: &mut [f32],
+    width: usize,
+    lo: usize,
+    start: &[f32],
+    step: Option<&[f32]>,
+    first: usize,
+) where
+    f32: From<T>,
+{
+    let hi = lo + start.len();
+    match step {
+        None => {
+            for (frame, &x) in out.chunks_exact_mut(width).zip(input) {
+                let x = f32::from(x) * scale;
+                for (o, &g) in frame[lo..hi].iter_mut().zip(start) {
+                    *o += x * g;
+                }
+            }
         }
+        Some(step) => {
+            for (i, (frame, &x)) in out.chunks_exact_mut(width).zip(input).enumerate() {
+                let x = f32::from(x) * scale;
+                let k = (first + i + 1) as f32;
+                for ((o, &g), &d) in frame[lo..hi].iter_mut().zip(start).zip(step) {
+                    *o += x * (g + d * k);
+                }
+            }
+        }
+    }
+}
 
-        gst::info!(CAT, obj = element, "pending config: {:?}", config);
-
-        let _ = state.pending_config.insert(config);
-
-        // reconfigure the output later from the output thread
-        self.obj().src_pad().mark_reconfigure();
+impl MultiMixerElement {
+    /// Gives the mixer its scene, which fixes its output width. Called once, by the bin, before it runs.
+    pub(crate) fn set_scene(&self, scene: Arc<Mutex<Scene>>) {
+        let mut state = self.state.lock().unwrap();
+        let (rows, width) = {
+            let s = scene.lock().unwrap();
+            (s.participants.len(), s.width())
+        };
+        state.gains = Gains::new(rows, width);
+        state.scene = Some(scene);
     }
 }

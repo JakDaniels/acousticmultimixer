@@ -8,7 +8,8 @@ spatial rooms; the aim is for it to be generally useful and, in time, to be offe
 
 - The original design, with the DSP ideas and the cost analysis: [docs/design.md](docs/design.md). This plan
   holds the decisions; where they differ, this plan wins.
-- Status: **step 1 done** (2026-11-18): the template runs under our name, with a fixed width. Next: step 2.
+- Status: **step 2 done** (2026-11-18): stereo mix-minus with distance and pan, parity with SpatialAudioServer's
+  `matrix` engine. Next: SpatialAudioServer's `acoustic` engine (its issue #8), then step 3.
 
 ## 1. Decisions so far
 
@@ -23,6 +24,7 @@ spatial rooms; the aim is for it to be generally useful and, in time, to be offe
 | Toolchain | Rust stable through rustup (in `~/.cargo`), clippy, rustfmt, cargo-c | 2026-11-18 |
 | Pair gains | the element computes level and direction from positions; the application may add a gain per (speaker, listener) pair on top (0 = muted), for per-person volume | 2026-11-18 |
 | Speaker facing | the `yaw` of a voice is accepted from the start but has no effect until the geometry work (Later) | 2026-11-18 |
+| Orientation | `yaw`, `pitch`, `roll` in degrees (not yaw alone): SpatialAudioServer orients listeners by quaternion, and pitch and roll change the pan; conversion in section 3 | 2026-11-18 |
 | Pad roles | one kind of participant: every `sink_N` has its `mix_N`; listen-only = `sink_N` never fed, talk-only = `mix_N` never linked (skipped) | 2026-11-18 |
 | Pad changes | fixed width, option (b) of step 1: construct-only `max-participants` (default 32, up to 256), pads numbered below it, the mix always that wide, so pads come and go without renegotiating; no access to AudioAggregator's private struct | 2026-11-18 |
 
@@ -106,35 +108,47 @@ coefficients) or a dense one, once, when caps are set.
 - **Range.** Coefficients are limited to ±1 (no boost); ours allows gains above 1, as SpatialAudioServer's
   per-person volume does.
 
-## 3. The element's interface (proposed)
+## 3. The element's interface
 
 ```text
-gst-launch-1.0 acousticmultimixer name=m room=office \
-  audiotestsrc freq=440 ! m.sink_0   m.sink_0::x=0 m.sink_0::y=2 \
-  audiotestsrc freq=220 ! m.sink_1   m.sink_1::x=3 m.sink_1::y=0 \
+gst-launch-1.0 acousticmultimixer name=m sink_1::y=4 sink_2::x=8 \
+  audiotestsrc freq=440 ! m.sink_0 \
+  audiotestsrc wave=ticks ! m.sink_1 \
+  audiotestsrc freq=220 ! m.sink_2 \
   m.mix_0 ! audioconvert ! autoaudiosink
 ```
 
-- **Pads:** `sink_%u` request pads (mono, F32 or S16, at the element's `sample-rate`); each one creates a
-  `mix_%u` sometimes pad (stereo F32 or S16): what participant N hears. Release `sink_N` to remove both.
+- **Pads:** `sink_%u` request pads (mono, F32 or S16, at the element's `sample-rate`), numbered below
+  `max-participants`; each one creates a `mix_%u` sometimes pad (stereo F32 or S16): what participant N hears.
+  Release `sink_N` to remove both. With more than one output linked, a `queue` after each. Pad properties can be
+  set in gst-launch inside the element's description, as with `compositor` (`sink_1::y=4`): the element exposes
+  its sink pads as its children (GstChildProxy).
 - **Per-participant properties, on `sink_%u`:**
-  - `x`, `y`, `z`, `yaw` (and later `pitch`): where the voice comes from and which way it faces (facing has no
-    effect until the geometry work);
-  - `listener-x`, `listener-y`, `listener-z`, `listener-yaw`: where this participant hears from. SpatialAudioServer
-    keeps the speaking and listening poses apart (SL viewers can hear from their camera); by default they follow
-    the speaking pose;
-  - `gain` (0–10, applies to everyone hearing this voice), `mute`;
+  - `x`, `y`, `z`, `yaw`, `pitch`, `roll`: where the voice is and which way it faces (SL/OpenSim axes: x east,
+    y north, z up; degrees; all 0 faces +x; yaw turns left, pitch looks up, roll lowers the right ear). Setting any
+    of them sets `positioned`; a participant without a position is heard centred at full volume and hears everyone
+    that way (as SpatialAudioServer does for participants without a pose). Facing has no effect on the voice yet;
+  - `listener-x` … `listener-roll`: where this participant hears from (SL viewers can hear from their camera);
+    setting any sets `listener-separate`, otherwise they hear from the speaking pose;
+  - from a quaternion (x, y, z, w), as SpatialAudioServer holds them: yaw = atan2(2(wz + xy), 1 − 2(y² + z²)),
+    pitch = −asin(2(wy − zx)), roll = atan2(2(wx + yz), 1 − 2(x² + y²)) (tested against its rotation code);
+  - `gain` (0–10, for everyone hearing this voice), `mute`;
   - `trims`: what this participant, as a listener, has done to others' voices: a structure of gains by speaker
     pad, e.g. `trims,sink_0=0.0,sink_2=0.5` (0 = muted for them only, 1 = unchanged, up to 10), multiplied onto
-    the computed level. SpatialAudioServer's per-person mute and volume map onto it;
-  - listen-only and talk-only participants need nothing special: an unfed `sink_N` contributes silence (and is
-    skipped), an unlinked `mix_N` is not mixed at all.
-- **Element properties:** `sample-rate` (construct-only); the distance model (`distance-model` = inverse,
-  exponential, linear; `reference-distance`, `rolloff`, `max-range`), matching SpatialAudioServer's `Media:Spatial`
-  settings and profiles; `room` (preset name: `none`, `small-room`, `office`, `hall`, `cave`, `outdoors`, …);
-  `reverb-level`; the aggregator properties `minus1mixer` already proxies (`latency`, `force-live`, …).
-- Property changes only mark the coefficients as stale. They are recomputed once per output buffer, outside the
-  inner loops, and the audio path ramps from the old values to the new ones across the buffer (no clicks).
+    the computed level. SpatialAudioServer's per-person mute and volume map onto it. A participant leaving is
+    removed from everyone's trims, so a newcomer given the same pad number starts clean;
+  - listen-only and talk-only participants need nothing special: an unfed `sink_N` contributes nothing, an
+    unlinked `mix_N` is not mixed.
+- **Element properties:** `sample-rate` and `max-participants` (construct-only); the distance model
+  (`distance-model` = `inverse`, `exponential` (default), `linear`; `reference-distance` 2, `rolloff` 1,
+  `max-range` 60: SpatialAudioServer's `outdoor` profile; its `meeting` profile is linear, 10, 2, 60); the
+  aggregator properties `minus1mixer` already proxies (`latency`, `force-live`, …). Later: `room`, `reverb-level`.
+- Property changes only mark the scene as changed. The gains are recomputed at most once per output buffer, and a
+  changed path ramps linearly from the old value to the new one across that buffer (10 ms by default). A new
+  participant, or an output just linked, starts at its values: there is nothing to click from.
+- Setting a pose takes several property sets (x, y, z, …), and the mixer may take the scene between two of them;
+  the result is one buffer ramping towards an in-between pose, inaudible at the rates poses change. If it ever
+  matters, a `pose` property taking all six at once.
 
 ## 4. Steps
 
@@ -200,6 +214,29 @@ everyone still receiving), and capacity (numbers reused, refusal when full or ou
 - **Here SpatialAudioServer can start using it** (issue #8 there): an `acoustic` engine, offered only when the
   element is installed, run through the existing engine test suites. Same sound as `matrix`, so any difference is
   plumbing, not acoustics.
+
+**Done (2026-11-18).**
+- `spatial.rs` holds SpatialAudioServer's formulas (`SpatialPolicy.cs`: the three distance models, the pan from
+  the angle, constant-power stereo with the centre at unity on both sides), with plain Rust tests including its
+  quaternion rotation against our yaw/pitch/roll over 1000 random orientations; `scene.rs` the participants and
+  the gain matrix; `pad.rs` the sink pad type and its properties.
+- The mixer's output is still one wide buffer, now two channels per participant, and its inner loop is per input
+  sample one multiply-add over a contiguous run of the output frame (`out[lo..hi] += x × gains`), which
+  vectorises; the run is narrowed per input to the listeners who hear it, and an input heard by nobody is skipped.
+- The SplitMeta is gone: with a fixed layout, output N is always channels 2N and 2N + 1. All outputs get every
+  buffer, so the splitter no longer sends GAP events (the mono FIXME went with them).
+- Element tests with exact values from the formulas: level and pan from positions, a move ramping over one buffer
+  (checked frame by frame), gain, mute and trims, a separate listener pose, the distance model and range, alone =
+  silence, talk-only, and the gst-launch pad property syntax. 30 repeat runs clean.
+- **Benchmark** (`scripts/bench.py`, [docs/benchmarks.md](docs/benchmarks.md)): 32 participants, live, on a
+  4-core Pentium Silver N6005: about 21 % of a core against 26–31 % for SpatialAudioServer's `matrix` mixing
+  (audiointerleave + tee + 32 × queue + audiomixmatrix), without the encoders either way. Our cost hardly changes
+  with the number talking: the mixing arithmetic is now small, and what remains is GStreamer's per-buffer work
+  (the aggregator's input handling: a plain `audiomixer` with the same 32 inputs costs 7 %; 32 output pushes and
+  their queues, which every per-listener design has). Longer output buffers (20 ms) would halve that, at the cost
+  of latency; worth trying alongside SpatialAudioServer's 40 ms Opus frames.
+- Not yet: recomputing only the paths that changed (the whole matrix is recomputed when anything changes:
+  1,024 paths at 32 participants, about 50 µs; at 256 participants it would matter).
 
 ### Step 3: direction cues (ITD, ILD, distance colour)
 - **ITD:** the far ear hears the voice up to ~0.6 ms later, read from the input's history ring with a fractional
