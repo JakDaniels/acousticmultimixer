@@ -8,9 +8,11 @@ spatial rooms; the aim is for it to be generally useful and, in time, to be offe
 
 - The original design, with the DSP ideas and the cost analysis: [docs/design.md](docs/design.md). This plan
   holds the decisions; where they differ, this plan wins.
-- Status: **step 3 done** (2026-11-18): the head model (ITD, ILD, head shadow) and air absorption, on top of
-  step 2's distance and pan; SpatialAudioServer's `acoustic` engine uses the element. Next: listening tests, then
-  step 4 (early reflections).
+- Status: **step 4 done** (2026-11-18): early reflections and room presets, on top of step 3's head model and
+  step 2's distance and pan; SpatialAudioServer's `acoustic` engine uses the element, and its rooms choose a preset.
+  Open work is in this repository's GitHub issues (on the shared project board,
+  https://github.com/users/JakDaniels/projects/1); this plan keeps the design and the decisions, and links to them:
+  step 5, late reverb (#1); the silence gate (#2); geometry (#3); step 6, packaging (#4).
 
 ## 1. Decisions so far
 
@@ -146,8 +148,8 @@ gst-launch-1.0 acousticmultimixer name=m sink_1::y=4 sink_2::x=8 \
   `direction-model` (`head`, the default: the far ear later, quieter and duller; `pan`: a constant-power stereo
   pan), `air-absorption` (dB per metre at 8 kHz, default 0.1; `pan` with 0 is SpatialAudioServer's `matrix`
   exactly), `rear-shadow` (`head` only: the low-pass cut-off for a voice straight behind, default 4000 Hz) and
-  `room` (early reflections: `outdoor`, the default, none; `small-room`, `hall`, `cave`); the aggregator properties `minus1mixer` already proxies (`latency`, `force-live`, …). Later: `room`,
-  `reverb-level`.
+  `room` (early reflections: `outdoor`, the default, none; `small-room`, `hall`, `cave`); the aggregator properties
+  `minus1mixer` already proxies (`latency`, `force-live`, …). Later: reverb settings (#1).
 - Property changes only mark the scene as changed. The gains are recomputed at most once per output buffer, and a
   changed path ramps linearly from the old value to the new one across that buffer (10 ms by default). A new
   participant, or an output just linked, starts at its values: there is nothing to click from.
@@ -286,7 +288,7 @@ everyone still receiving), and capacity (numbers reused, refusal when full or ou
   air.
 - SpatialAudioServer: its spatial suite's "on the left" check required the far ear below −14 dB (a stereo pan's
   silence); now −3 dB, which both models meet.
-- **To decide:** a silence gate. Participants who are not talking still produce audio (decoded comfort noise), and
+- **To decide ([#2](https://github.com/JakDaniels/acousticmultimixer/issues/2)):** a silence gate. Participants who are not talking still produce audio (decoded comfort noise), and
   with `head` every one of them costs as much as a talker: 47 % against 22 % when they are silent (GAP). Skipping
   inputs whose buffer peaks below a threshold would make the cost follow the talkers, but changes what is heard
   (the noise floor goes) and needs a threshold that never cuts quiet speech.
@@ -321,7 +323,7 @@ is seamless).
   bounded interiors, and outdoor has none), then the silence gate, then geometry (first-order image sources for a
   box room from its dimensions: per-path delays, affordable once only talkers are mixed).
 
-### Step 5: shared late reverb
+### Step 5: shared late reverb (#1)
 - One reverb per element (a feedback delay network or a Freeverb/Dattorro-style tank: no FFT needed), fed by a
   send from every voice, added to every output.
 - **To solve first: mix-minus for the reverb.** A tail made from everyone's voices contains the listener's own
@@ -335,7 +337,7 @@ is seamless).
   Measure the first option; it keeps the design's "shared" saving and stays correct.
 - Denormals: flush to zero (or add a tiny offset) in decaying tails.
 
-### Step 6: packaging and releases
+### Step 6: packaging and releases (#4)
 - As design.md "Packaging": `.deb`/`.rpm` (`gstreamer1.0-acousticmultimixer`, Fedora `gstreamer1-acousticmultimixer`)
   for x64 and arm64, built against 1.24, installed into the system plugin directory; SpatialAudioServer's package
   *recommends* it.
@@ -351,7 +353,7 @@ is seamless).
   MSI build downloads the DLL from a pinned release of this repository, so each installer ships a known version.
 
 ### Later
-- Room geometry and image-source reflections (design.md "Future geometry support").
+- Room geometry and image-source reflections (design.md "Future geometry support"; first-order, for a box room: #3).
 - HRTF for the nearest or loudest voices (look at gst-plugins-rs's `hrtfrender` first), occlusion, materials.
 - Offering it upstream: once it is working and tested, documented, and (ideally) used beyond SpatialAudioServer,
   a merge request to gst-plugins-rs. By then `minus1mixer` may have moved on; keep our changes easy to compare with
