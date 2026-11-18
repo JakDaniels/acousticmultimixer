@@ -14,3 +14,5 @@ What changed in each release.
   quieter and duller; `direction-model=pan` keeps the stereo pan. Distant voices lose high frequencies
   (`air-absorption`), and voices behind the listener are duller in both ears (`rear-shadow`), so front and back
   sound different.
+- Rooms (`room`: `outdoor`, the default, `small-room`, `hall`, `cave`): each voice gets the early reflections of
+  that kind of space, the later ones heard more from all around and relatively louder the further away it is.

@@ -38,7 +38,9 @@
  * voice later (up to 0.66 ms), quieter and duller, as a head between the ears would, and
  * voices behind duller in both ears ("rear-shadow"), as the outer ears make them; "pan" is a
  * constant-power stereo pan (silent in the far ear at the side; with air-absorption=0, the same
- * as SpatialAudioServer's matrix engine).
+ * as SpatialAudioServer's matrix engine). "room" adds the early reflections of a kind of space
+ * ("outdoor", the default, has none): a few echoes after each voice, the later ones heard more
+ * from all around, and relatively louder the further away the voice is.
  * Changes are taken once per output buffer and ramp across it, so moving does not click.
  *
  * The sample rate is not negotiated, as this is not possible to do in a race-free manner. It
@@ -280,6 +282,12 @@ impl ObjectImpl for AcousticMultiMixer {
                     .mutable_playing()
                     .build(),
 
+                glib::ParamSpecEnum::builder_with_default("room", Acoustics::default().room)
+                    .nick("Room")
+                    .blurb("The space every voice is in, for its early reflections: outdoor (none), small-room, hall, cave")
+                    .mutable_playing()
+                    .build(),
+
                 glib::ParamSpecDouble::builder("rear-shadow")
                     .nick("Rear shadow")
                     .blurb("Head model: low-pass cut-off (Hz) for a source straight behind, easing to none at the side (0 = none)")
@@ -394,7 +402,7 @@ impl ObjectImpl for AcousticMultiMixer {
                 settings.max_participants = value.get::<u32>().unwrap();
             }
 
-            "direction-model" | "air-absorption" | "rear-shadow" => {
+            "direction-model" | "air-absorption" | "rear-shadow" | "room" => {
                 let state_guard = self.state.lock().unwrap();
                 let state = state_guard.as_ref().expect("state");
                 let mut scene = state.scene.lock().unwrap();
@@ -402,6 +410,7 @@ impl ObjectImpl for AcousticMultiMixer {
                     "direction-model" => {
                         scene.acoustics.direction = value.get::<DirectionModel>().unwrap()
                     }
+                    "room" => scene.acoustics.room = value.get::<crate::rooms::Room>().unwrap(),
                     "air-absorption" => scene.acoustics.air_absorption = value.get().unwrap(),
                     _ => scene.acoustics.rear_shadow = value.get().unwrap(),
                 }
@@ -458,12 +467,13 @@ impl ObjectImpl for AcousticMultiMixer {
                 settings.max_participants.to_value()
             }
 
-            "direction-model" | "air-absorption" | "rear-shadow" => {
+            "direction-model" | "air-absorption" | "rear-shadow" | "room" => {
                 let state_guard = self.state.lock().unwrap();
                 let state = state_guard.as_ref().expect("state");
                 let acoustics = state.scene.lock().unwrap().acoustics;
                 match pspec.name() {
                     "direction-model" => acoustics.direction.to_value(),
+                    "room" => acoustics.room.to_value(),
                     "air-absorption" => acoustics.air_absorption.to_value(),
                     _ => acoustics.rear_shadow.to_value(),
                 }

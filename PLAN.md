@@ -145,7 +145,8 @@ gst-launch-1.0 acousticmultimixer name=m sink_1::y=4 sink_2::x=8 \
   `max-range` 60: SpatialAudioServer's `outdoor` profile; its `meeting` profile is linear, 10, 2, 60);
   `direction-model` (`head`, the default: the far ear later, quieter and duller; `pan`: a constant-power stereo
   pan), `air-absorption` (dB per metre at 8 kHz, default 0.1; `pan` with 0 is SpatialAudioServer's `matrix`
-  exactly) and `rear-shadow` (`head` only: the low-pass cut-off for a voice straight behind, default 4000 Hz); the aggregator properties `minus1mixer` already proxies (`latency`, `force-live`, …). Later: `room`,
+  exactly), `rear-shadow` (`head` only: the low-pass cut-off for a voice straight behind, default 4000 Hz) and
+  `room` (early reflections: `outdoor`, the default, none; `small-room`, `hall`, `cave`); the aggregator properties `minus1mixer` already proxies (`latency`, `force-live`, …). Later: `room`,
   `reverb-level`.
 - Property changes only mark the scene as changed. The gains are recomputed at most once per output buffer, and a
   changed path ramps linearly from the old value to the new one across that buffer (10 ms by default). A new
@@ -295,6 +296,30 @@ everyone still receiving), and capacity (numbers reused, refusal when full or ou
   distance, panned progressively wider (design.md, "Reflection positioning").
 - Presets as data (delays, gains, absorption, reverb settings), so new rooms need no code.
 - The history ring grows to the longest tap (a cave's 430 ms ≈ 20,600 samples per input at 48 kHz: 82 KB, fine).
+
+**Done (2026-11-18), listening-tested from Firestorm** (each preset sounds different; changing it while people talk
+is seamless).
+- `room` property; presets in `rooms.rs` as data: four taps each (delay after the direct sound, level at the
+  reference distance) and a one-pole low-pass for the walls. small-room 3/7/11/17 ms, −9…−19 dB, 6 kHz; hall
+  15/25/40/70 ms, −10…−19 dB, 5 kHz; cave 80/140/220/430 ms, −8…−20 dB, 3 kHz; outdoor none.
+- The taps' delays are the same for every listener, so not per path as first planned: each speaker's
+  reflections are made once, from a ring of its input (a power of two above the longest tap, allocated when the
+  room changes), as three signals: a directional part (tap k contributes 1 − (k + 1)/n of its level) and left and
+  right diffuse parts ((k + 1)/n; their delays 8 % apart, alternately earlier on each side, for width), each
+  low-passed for the walls. A path adds them with two levels per ear: the directional part times the ear's share
+  of the direct sound, the diffuse part the same in both ears.
+- Reflections fall off with distance at half the direct sound's rate in dB (level √(distance gain)), so a far
+  voice is relatively roomier, a distance cue. Close up they add to the direct sound (small room at 2 m: about
+  5 dB louder than outdoors).
+- Cost: +10 % of a core at 32 participants (48 → 58 %, as fast as possible), the same for every preset; mixing
+  the reflections per listener pair (left and right columns together) keeps that loop simple enough to vectorise
+  (it was +25 % per column).
+- Known limit: a speaker's input that stops (GAP buffers) clears its ring, cutting its echo tail. SpatialAudioServer's
+  decoders keep producing audio between words, so it does not arise there.
+- Next, agreed order: step 5 (a feedback delay network per voice; each listener hears the room's total minus their
+  own, exact since reverb is linear; the late field is the same everywhere in a room, so sharing it is right for
+  bounded interiors, and outdoor has none), then the silence gate, then geometry (first-order image sources for a
+  box room from its dimensions: per-path delays, affordable once only talkers are mixed).
 
 ### Step 5: shared late reverb
 - One reverb per element (a feedback delay network or a Freeverb/Dattorro-style tank: no FFT needed), fed by a

@@ -11,6 +11,20 @@ side includes the Opus encoders or WebRTC, which cost the same either way.
 - **Quiet:** a sine at −80 dB, as decoded comfort noise: real audio to mix. **Silent (GAP):** buffers flagged GAP,
   which aggregators skip.
 
+## 2026-11-18: step 4 (early reflections)
+
+Same machine and settings (defaults: `head`, air 0.1), as fast as possible, 32 participants, 30 s, acousticmultimixer
+only:
+
+| case | `outdoor` | `small-room` (per column) | `small-room` (final) | `cave` (per column) |
+|---|---|---|---|---|
+| 32 talking | 47.3 % | 71.9 % | 58.4 % | 71.4 % |
+| 3 talking, 29 quiet | 47.5 % | 74.9 % | 55.5 % | 74.3 % |
+| 3 talking, 29 silent (GAP) | 22.3 % | 25.4 % | 25.7 % | 24.9 % |
+
+The preset makes no difference (the taps are read once per speaker); mixing the reflections a listener at a time
+(left and right columns together) instead of a column at a time cut the extra cost from +25 % to +10 %.
+
 ## 2026-11-18: step 3 (head model and air absorption)
 
 Same machine. As fast as possible, 32 participants, 30 s, acousticmultimixer only (`--ours-only --props …`):

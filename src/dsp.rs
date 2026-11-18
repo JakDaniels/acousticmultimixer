@@ -7,9 +7,67 @@
 //!
 //! Layout: one row per speaker of `width` values, listener l's left ear at column 2l and right at 2l + 1, the same
 //! as the mixer's output frame, so a speaker's row lines up with the frame it adds into.
+//!
+//! Early reflections: a room's taps have the same delays for every listener, so each speaker's reflections are
+//! made once, from a longer ring of its input, as three signals (the part heard from its direction, and the parts
+//! heard from all around in the left and in the right ear), low-passed for the walls; each path then adds them with
+//! its own two levels per ear.
 
+use crate::rooms::{Room, SPREAD, diffuse_share};
 use crate::scene::PathTable;
 use crate::spatial::{MAX_ITD, NO_FILTER_HZ};
+
+/// A room's taps in samples and gains, ready to mix.
+#[derive(Debug, Default)]
+struct Taps {
+    /// Per tap: delay of the directional copy, and of the left and right diffuse copies (samples).
+    centre: Vec<usize>,
+    left: Vec<usize>,
+    right: Vec<usize>,
+    /// Per tap: its gain towards the directional and the diffuse signals.
+    directional: Vec<f32>,
+    diffuse: Vec<f32>,
+    /// The walls' low-pass (1 = none).
+    pole: f32,
+    /// Ring length per speaker (a power of two above the longest delay).
+    ring_len: usize,
+}
+
+impl Taps {
+    fn new(room: Room, rate: f64) -> Self {
+        let preset = room.preset();
+        let n = preset.taps.len();
+        let mut taps = Taps {
+            pole: pole(preset.cutoff_hz, rate),
+            ..Taps::default()
+        };
+        for (k, t) in preset.taps.iter().enumerate() {
+            let samples = |ms: f64| ((ms / 1000.0 * rate).round() as usize).max(1);
+            // Alternately earlier on the left and on the right.
+            let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
+            taps.centre.push(samples(t.delay_ms));
+            taps.left.push(samples(t.delay_ms * (1.0 - sign * SPREAD)));
+            taps.right.push(samples(t.delay_ms * (1.0 + sign * SPREAD)));
+            let gain = 10f64.powf(t.gain_db / 20.0);
+            let share = diffuse_share(k, n);
+            taps.directional.push((gain * (1.0 - share)) as f32);
+            taps.diffuse.push((gain * share) as f32);
+        }
+        let longest = taps
+            .left
+            .iter()
+            .chain(&taps.right)
+            .chain(&taps.centre)
+            .copied()
+            .max();
+        taps.ring_len = longest.map_or(0, |d| (d + 1).next_power_of_two());
+        taps
+    }
+
+    fn any(&self) -> bool {
+        !self.centre.is_empty()
+    }
+}
 
 pub struct Paths {
     rows: usize,
@@ -27,6 +85,13 @@ pub struct Paths {
     delay_step: Vec<f32>,
     /// One-pole low-pass coefficient (1 = no filter); takes its new value at the buffer start.
     pole: Vec<f32>,
+    /// The reflections' levels: directional and diffuse, ramped like the gains.
+    reflect_start: Vec<f32>,
+    reflect_end: Vec<f32>,
+    reflect_step: Vec<f32>,
+    diffuse_start: Vec<f32>,
+    diffuse_end: Vec<f32>,
+    diffuse_step: Vec<f32>,
     table: PathTable,
 
     // Per row: does it ramp this buffer; is it plain gains (no delays, no filters: the fast loop); the columns
@@ -40,6 +105,15 @@ pub struct Paths {
     filter: Vec<f32>,
     history: Vec<Vec<f32>>,
     next_pos: Vec<u64>,
+    /// The room's taps, each speaker's ring of input for them (and where it writes next), and the walls' filter
+    /// memory for its three reflection signals.
+    room: Room,
+    taps: Taps,
+    ring: Vec<Vec<f32>>,
+    ring_at: Vec<usize>,
+    wall: Vec<[f32; 3]>,
+    /// Scratch: one call's reflection signals.
+    reflections: [Vec<f32>; 3],
     /// Output frame at which the current buffer starts, and its length.
     buffer_pos: u64,
     frames: usize,
@@ -63,6 +137,12 @@ impl Paths {
             delay_end: vec![0.0; len],
             delay_step: vec![0.0; len],
             pole: vec![1.0; len],
+            reflect_start: vec![0.0; len],
+            reflect_end: vec![0.0; len],
+            reflect_step: vec![0.0; len],
+            diffuse_start: vec![0.0; len],
+            diffuse_end: vec![0.0; len],
+            diffuse_step: vec![0.0; len],
             table: PathTable::new(len),
             ramping: vec![false; rows],
             plain: vec![true; rows],
@@ -70,6 +150,12 @@ impl Paths {
             filter: vec![0.0; len],
             history: vec![vec![0.0; history_len]; rows],
             next_pos: vec![u64::MAX; rows],
+            room: Room::Outdoor,
+            taps: Taps::default(),
+            ring: vec![vec![]; rows],
+            ring_at: vec![0; rows],
+            wall: vec![[0.0; 3]; rows],
+            reflections: Default::default(),
             buffer_pos: 0,
             frames: 0,
             work: vec![],
@@ -100,6 +186,8 @@ impl Paths {
         } else {
             self.gain_start.copy_from_slice(&self.gain_end);
             self.delay_start.copy_from_slice(&self.delay_end);
+            self.reflect_start.copy_from_slice(&self.reflect_end);
+            self.diffuse_start.copy_from_slice(&self.diffuse_end);
             if let Some(fresh) = update(&mut self.table) {
                 self.take_table(&fresh);
             }
@@ -110,16 +198,26 @@ impl Paths {
         for row in 0..self.rows {
             let r = row * width..(row + 1) * width;
             let ramping = self.gain_start[r.clone()] != self.gain_end[r.clone()]
-                || self.delay_start[r.clone()] != self.delay_end[r.clone()];
+                || self.delay_start[r.clone()] != self.delay_end[r.clone()]
+                || self.reflect_start[r.clone()] != self.reflect_end[r.clone()]
+                || self.diffuse_start[r.clone()] != self.diffuse_end[r.clone()];
             self.ramping[row] = ramping;
             if ramping {
                 for c in r.clone() {
                     self.gain_step[c] = (self.gain_end[c] - self.gain_start[c]) * inv_frames;
                     self.delay_step[c] = (self.delay_end[c] - self.delay_start[c]) * inv_frames;
+                    self.reflect_step[c] =
+                        (self.reflect_end[c] - self.reflect_start[c]) * inv_frames;
+                    self.diffuse_step[c] =
+                        (self.diffuse_end[c] - self.diffuse_start[c]) * inv_frames;
                 }
             }
             let audible = |c: usize| {
-                self.gain_start[row * width + c] != 0.0 || self.gain_end[row * width + c] != 0.0
+                let i = row * width + c;
+                self.gain_start[i] != 0.0
+                    || self.gain_end[i] != 0.0
+                    || self.diffuse_start[i] != 0.0
+                    || self.diffuse_end[i] != 0.0
             };
             self.span[row] = match (0..width).find(|&c| audible(c)) {
                 Some(lo) => (lo, (lo..width).rfind(|&c| audible(c)).unwrap() + 1),
@@ -145,16 +243,32 @@ impl Paths {
             self.delay_end[i] = (self.table.delay[i] * rate).clamp(0.0, max_delay);
             self.pole[i] = pole(self.table.cutoff[i] as f64, self.rate);
         }
+        self.reflect_end.copy_from_slice(&self.table.reflect);
+        self.diffuse_end.copy_from_slice(&self.table.diffuse);
+        if self.table.room != self.room {
+            // A new room: its taps, and rings long enough for them (empty outdoors), starting silent.
+            self.room = self.table.room;
+            self.taps = Taps::new(self.room, self.rate);
+            for row in 0..self.rows {
+                self.ring[row] = vec![0.0; self.taps.ring_len];
+                self.ring_at[row] = 0;
+                self.wall[row] = [0.0; 3];
+            }
+        }
         let width = self.width;
         for &n in fresh {
             let row = n * width..(n + 1) * width;
             self.gain_start[row.clone()].copy_from_slice(&self.gain_end[row.clone()]);
             self.delay_start[row.clone()].copy_from_slice(&self.delay_end[row.clone()]);
+            self.reflect_start[row.clone()].copy_from_slice(&self.reflect_end[row.clone()]);
+            self.diffuse_start[row.clone()].copy_from_slice(&self.diffuse_end[row.clone()]);
             self.filter[row].fill(0.0);
             for r in 0..self.rows {
                 for c in [r * width + 2 * n, r * width + 2 * n + 1] {
                     self.gain_start[c] = self.gain_end[c];
                     self.delay_start[c] = self.delay_end[c];
+                    self.reflect_start[c] = self.reflect_end[c];
+                    self.diffuse_start[c] = self.diffuse_end[c];
                     self.filter[c] = 0.0;
                 }
             }
@@ -183,6 +297,8 @@ impl Paths {
         if self.next_pos[row] != pos {
             self.history[row].fill(0.0);
             self.filter[row * width..(row + 1) * width].fill(0.0);
+            self.ring[row].fill(0.0);
+            self.wall[row] = [0.0; 3];
         }
         self.next_pos[row] = pos + n as u64;
         let mut work = std::mem::take(&mut self.work);
@@ -230,10 +346,121 @@ impl Paths {
             }
         }
 
+        if self.taps.any() {
+            self.reflect(row, &work[h..h + n]);
+            if lo < hi {
+                let r = row * width;
+                let ramping = self.ramping[row];
+                let [centre, left, right] = &self.reflections;
+                // Whole listeners: widen the span to even columns (the extra ones have zero levels).
+                let (lo, hi) = (lo & !1, (hi + 1) & !1);
+                mix_reflections(
+                    [centre, left, right],
+                    out,
+                    width,
+                    lo,
+                    [
+                        &self.reflect_start[r + lo..r + hi],
+                        &self.diffuse_start[r + lo..r + hi],
+                    ],
+                    ramping.then(|| {
+                        [
+                            &self.reflect_step[r + lo..r + hi],
+                            &self.diffuse_step[r + lo..r + hi],
+                        ]
+                    }),
+                    offset,
+                );
+            }
+        }
+
         // Keep the last history_len samples.
         let end = h + n;
         self.history[row].copy_from_slice(&work[end - h..end]);
         self.work = work;
+    }
+}
+
+impl Paths {
+    /// Writes a speaker's input into its ring and makes its three reflection signals for those frames (into
+    /// `self.reflections`): each tap read that far back in the ring, summed with its gains, low-passed for the walls.
+    fn reflect(&mut self, row: usize, input: &[f32]) {
+        let n = input.len();
+        let taps = &self.taps;
+        let ring = &mut self.ring[row];
+        let mask = ring.len() - 1;
+        let mut at = self.ring_at[row];
+        let [y0, y1, y2] = &mut self.wall[row];
+        let a = taps.pole;
+        for signal in &mut self.reflections {
+            signal.clear();
+            signal.resize(n, 0.0);
+        }
+        let [centre, left, right] = &mut self.reflections;
+        for (k, &x) in input.iter().enumerate() {
+            ring[at & mask] = x;
+            let (mut c, mut l, mut r) = (0.0, 0.0, 0.0);
+            for t in 0..taps.centre.len() {
+                c += taps.directional[t] * ring[at.wrapping_sub(taps.centre[t]) & mask];
+                l += taps.diffuse[t] * ring[at.wrapping_sub(taps.left[t]) & mask];
+                r += taps.diffuse[t] * ring[at.wrapping_sub(taps.right[t]) & mask];
+            }
+            *y0 += a * (c - *y0);
+            *y1 += a * (l - *y1);
+            *y2 += a * (r - *y2);
+            centre[k] = *y0;
+            left[k] = *y1;
+            right[k] = *y2;
+            at = at.wrapping_add(1);
+        }
+        self.ring_at[row] = at;
+    }
+}
+
+/// Adds a speaker's reflections into columns lo.. (lo and the count even: whole listeners): each ear takes the
+/// directional signal times its `reflect` level plus its side's diffuse signal times its `diffuse` level, ramped
+/// like the gains.
+fn mix_reflections(
+    signals: [&[f32]; 3],
+    out: &mut [f32],
+    width: usize,
+    lo: usize,
+    levels: [&[f32]; 2],
+    steps: Option<[&[f32]; 2]>,
+    first: usize,
+) {
+    let [centre, left, right] = signals;
+    let [reflect, diffuse] = levels;
+    let len = reflect.len();
+    // Whole listeners (left and right columns together), so each ear's side is fixed.
+    debug_assert!(lo.is_multiple_of(2) && len.is_multiple_of(2));
+    for (k, frame) in out.chunks_exact_mut(width).take(centre.len()).enumerate() {
+        let (c, l, r) = (centre[k], left[k], right[k]);
+        let frame = &mut frame[lo..lo + len];
+        match steps {
+            None => {
+                for ((o, rf), df) in frame
+                    .as_chunks_mut::<2>()
+                    .0
+                    .iter_mut()
+                    .zip(reflect.as_chunks::<2>().0)
+                    .zip(diffuse.as_chunks::<2>().0)
+                {
+                    o[0] += rf[0] * c + df[0] * l;
+                    o[1] += rf[1] * c + df[1] * r;
+                }
+            }
+            Some([reflect_step, diffuse_step]) => {
+                let t = (first + k + 1) as f32;
+                for (j, o) in frame.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+                    let (a, b) = (2 * j, 2 * j + 1);
+                    o[0] += (reflect[a] + reflect_step[a] * t) * c
+                        + (diffuse[a] + diffuse_step[a] * t) * l;
+                    o[1] += (reflect[b] + reflect_step[b] * t) * c
+                        + (diffuse[b] + diffuse_step[b] * t) * r;
+                }
+            }
+        }
     }
 }
 
@@ -477,5 +704,43 @@ mod tests {
         let out = run(&mut p, &[1.0; 4]);
         assert_eq!(column(&out, 2), [0.5; 4]);
         assert!(!p.ramping[0]);
+    }
+
+    #[test]
+    fn reflections_arrive_at_the_taps_delays() {
+        let mut p = Paths::new(2, 4, RATE);
+        p.next_buffer(512, |t| {
+            for c in [2, 3] {
+                t.gain[c] = 1.0;
+                t.reflect[c] = 1.0;
+                t.diffuse[c] = 1.0;
+            }
+            t.room = Room::Cave;
+            Some(vec![0, 1])
+        });
+        // An impulse: the direct sound at 0, then nothing until the first tap (80 ms, the left diffuse copy 8 %
+        // earlier: 3533 samples), which is beyond this buffer.
+        let mut input = vec![0.0; 512];
+        input[0] = 1.0;
+        let out = run(&mut p, &input);
+        let left = column(&out, 2);
+        assert_eq!(left[0], 1.0);
+        assert!(left[1..].iter().all(|&y| y == 0.0));
+        // Silence until just before the first tap's left copy, then its response through the walls' filter.
+        let mut at = 512;
+        let first = (0.080 * 0.92 * RATE).round() as usize;
+        while at + 512 <= first {
+            p.next_buffer(512, |_| None);
+            assert!(
+                column(&run(&mut p, &[0.0; 512]), 2)
+                    .iter()
+                    .all(|&y| y == 0.0)
+            );
+            at += 512;
+        }
+        p.next_buffer(512, |_| None);
+        let left = column(&run(&mut p, &[0.0; 512]), 2);
+        assert!(left[..first - at].iter().all(|&y| y == 0.0));
+        assert!(left[first - at] > 0.0);
     }
 }

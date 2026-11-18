@@ -227,6 +227,8 @@ pub struct Acoustics {
     /// Head model: the low-pass cut-off (Hz) for a source straight behind, as the outer ears shade sounds from
     /// behind; none at the side and in front. 0 = none.
     pub rear_shadow: f64,
+    /// The space, for its early reflections.
+    pub room: crate::rooms::Room,
 }
 
 impl Default for Acoustics {
@@ -235,6 +237,7 @@ impl Default for Acoustics {
             direction: DirectionModel::Head,
             air_absorption: DEFAULT_AIR_ABSORPTION,
             rear_shadow: DEFAULT_REAR_SHADOW,
+            room: crate::rooms::Room::Outdoor,
         }
     }
 }
@@ -539,6 +542,7 @@ mod tests {
             direction: DirectionModel::Head,
             air_absorption: 0.0,
             rear_shadow: 0.0,
+            room: crate::rooms::Room::Outdoor,
         };
         // Straight ahead: both ears the same, no delay, no filter.
         let [l, r] = ears(&Rendering::CENTRE, &head);
@@ -564,6 +568,7 @@ mod tests {
             direction: DirectionModel::Pan,
             air_absorption: 0.0,
             rear_shadow: 0.0,
+            room: crate::rooms::Room::Outdoor,
         };
         let [l, r] = ears(
             &Rendering {
@@ -584,6 +589,7 @@ mod tests {
             direction: DirectionModel::Head,
             air_absorption: 0.0,
             rear_shadow: 4000.0,
+            room: crate::rooms::Room::Outdoor,
         };
         let from = |behind: f64| {
             ears(

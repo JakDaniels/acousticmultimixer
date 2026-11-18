@@ -16,6 +16,7 @@ mod acousticmultimixer;
 mod dsp;
 mod mixer;
 mod pad;
+mod rooms;
 mod scene;
 mod spatial;
 mod splitter;
@@ -37,11 +38,12 @@ glib::wrapper! {
 }
 
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
-    // The mixer and the splitter stay internal to the bin; the pad type and the distance model enum are part
+    // The mixer and the splitter stay internal to the bin; the pad type and the enums are part
     // of its interface.
     AcousticMultiMixerPad::static_type().mark_as_plugin_api(gst::PluginAPIFlags::empty());
     spatial::DistanceModel::static_type().mark_as_plugin_api(gst::PluginAPIFlags::empty());
     spatial::DirectionModel::static_type().mark_as_plugin_api(gst::PluginAPIFlags::empty());
+    rooms::Room::static_type().mark_as_plugin_api(gst::PluginAPIFlags::empty());
 
     gst::Element::register(
         Some(plugin),

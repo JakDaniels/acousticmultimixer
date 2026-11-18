@@ -349,3 +349,42 @@ fn head_model_delays_and_quietens_the_far_ear() {
     let expected = 10f64.powf(-6.0 / 20.0);
     assert_constant(out[0].as_ref().unwrap(), (expected, 1.0), "settled");
 }
+
+#[test]
+fn room_adds_early_reflections() {
+    let mut room = Room::new(&[true, true], |m| {
+        m.set_property_from_str("room", "small-room");
+    });
+    place(room.pad(0), 0.0, 0.0, 0.0);
+    place(room.pad(1), 2.0, 0.0, 0.0); // 2 m ahead: full level, centred
+
+    // From silence, a constant: the direct sound at once, the first reflection 3 ms later (2.76 ms in the left
+    // ear, 3 ms in the right: its diffuse copies are moved apart).
+    let out = room.step(&[0.0, 1.0]);
+    let frames: Vec<_> = out[0].as_ref().unwrap().as_chunks::<2>().0.to_vec();
+    assert!(
+        frames[..132].iter().all(|f| f == &[1.0, 1.0]),
+        "direct only"
+    );
+    assert!(frames[132][0] > 1.0 && frames[132][1] == 1.0, "left first");
+    assert!(frames[144][1] > 1.0, "then right");
+
+    // Settled (the walls' low-pass passes a constant): every tap adds its level in both ears.
+    room.step(&[0.0, 1.0]);
+    let out = room.step(&[0.0, 1.0]);
+    let taps: f64 = [-9.0f64, -12.0, -15.0, -19.0]
+        .iter()
+        .map(|db| 10f64.powf(db / 20.0))
+        .sum();
+    assert_constant(
+        out[0].as_ref().unwrap(),
+        (1.0 + taps, 1.0 + taps),
+        "settled",
+    );
+
+    // Outdoors again: the direct sound only.
+    room.mixer.set_property_from_str("room", "outdoor");
+    room.step(&[0.0, 1.0]);
+    let out = room.step(&[0.0, 1.0]);
+    assert_constant(out[0].as_ref().unwrap(), (1.0, 1.0), "outdoor");
+}
