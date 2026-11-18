@@ -33,7 +33,11 @@
  * listener's own gains for others (e.g. trims,sink_0=0.0,sink_2=0.5). A participant with no
  * position (none of x … roll ever set) is heard centred at full volume, and hears everyone
  * that way. Level falls with distance by the element's "distance-model",
- * "reference-distance", "rolloff" and "max-range"; direction pans with constant power.
+ * "reference-distance", "rolloff" and "max-range", and distant voices lose high frequencies
+ * ("air-absorption"). Direction ("direction-model"): "head" (default) gives the far ear the
+ * voice later (up to 0.66 ms), quieter and duller, as a head between the ears would; "pan" is a
+ * constant-power stereo pan (silent in the far ear at the side; with air-absorption=0, the same
+ * as SpatialAudioServer's matrix engine).
  * Changes are taken once per output buffer and ramp across it, so moving does not click.
  *
  * The sample rate is not negotiated, as this is not possible to do in a race-free manner. It
@@ -65,7 +69,7 @@ use gst::subclass::prelude::*;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::scene::Scene;
-use crate::spatial::{DistanceModel, DistanceParams};
+use crate::spatial::{Acoustics, DirectionModel, DistanceModel, DistanceParams};
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
@@ -260,6 +264,21 @@ impl ObjectImpl for AcousticMultiMixer {
                     .mutable_playing()
                     .build(),
 
+                glib::ParamSpecEnum::builder_with_default("direction-model", Acoustics::default().direction)
+                    .nick("Direction model")
+                    .blurb("How direction is heard: a stereo pan, or a head (the far ear later, quieter, duller)")
+                    .mutable_playing()
+                    .build(),
+
+                glib::ParamSpecDouble::builder("air-absorption")
+                    .nick("Air absorption")
+                    .blurb("High-frequency loss with distance, dB per metre at 8 kHz (air: about 0.1; 0 = none)")
+                    .minimum(0.0)
+                    .maximum(10.0)
+                    .default_value(Acoustics::default().air_absorption)
+                    .mutable_playing()
+                    .build(),
+
                 // AudioAggregator properties we proxy for convenience and discoverability
 
                 glib::ParamSpecBoolean::builder("force-live")
@@ -365,6 +384,18 @@ impl ObjectImpl for AcousticMultiMixer {
                 settings.max_participants = value.get::<u32>().unwrap();
             }
 
+            "direction-model" | "air-absorption" => {
+                let state_guard = self.state.lock().unwrap();
+                let state = state_guard.as_ref().expect("state");
+                let mut scene = state.scene.lock().unwrap();
+                if pspec.name() == "direction-model" {
+                    scene.acoustics.direction = value.get::<DirectionModel>().unwrap();
+                } else {
+                    scene.acoustics.air_absorption = value.get().unwrap();
+                }
+                scene.dirty = true;
+            }
+
             "distance-model" | "reference-distance" | "rolloff" | "max-range" => {
                 let state_guard = self.state.lock().unwrap();
                 let state = state_guard.as_ref().expect("state");
@@ -413,6 +444,17 @@ impl ObjectImpl for AcousticMultiMixer {
             "max-participants" => {
                 let settings = self.settings.lock().unwrap();
                 settings.max_participants.to_value()
+            }
+
+            "direction-model" | "air-absorption" => {
+                let state_guard = self.state.lock().unwrap();
+                let state = state_guard.as_ref().expect("state");
+                let acoustics = state.scene.lock().unwrap().acoustics;
+                if pspec.name() == "direction-model" {
+                    acoustics.direction.to_value()
+                } else {
+                    acoustics.air_absorption.to_value()
+                }
             }
 
             "distance-model" | "reference-distance" | "rolloff" | "max-range" => {

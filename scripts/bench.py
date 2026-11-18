@@ -55,6 +55,7 @@ def gains(n, pos, listener):
 
 
 LIVE = False
+ELEMENT_PROPS = ""
 
 
 def source(i, talking, quiet_gap, buffers):
@@ -77,7 +78,7 @@ CAPS = "audio/x-raw,format=F32LE,rate=48000,channels=1"
 def ours(n, talking, quiet_gap, buffers):
     pos = positions(n)
     pads = " ".join(f"sink_{i}::x={x} sink_{i}::y={y} sink_{i}::yaw={yaw}" for i, (x, y, yaw) in enumerate(pos))
-    parts = [f"acousticmultimixer name=m max-participants={n} {pads}"]
+    parts = [f"acousticmultimixer name=m max-participants={n} {ELEMENT_PROPS} {pads}"]
     parts += [f"{source(i, talking, quiet_gap, buffers)} ! {CAPS} ! m.sink_{i}" for i in range(n)]
     parts += [f"m.mix_{i} ! queue ! fakesink" for i in range(n)]
     return " ".join(parts), []
@@ -146,10 +147,13 @@ def main():
     ap.add_argument("--seconds", type=int, default=60)
     ap.add_argument("--plugin-dir", default=os.path.join(ROOT, "target", "release"))
     ap.add_argument("--live", action="store_true", help="live sources, in real time")
+    ap.add_argument("--props", default="", help='acousticmultimixer properties, e.g. "direction-model=pan"')
+    ap.add_argument("--ours-only", action="store_true", help="skip the matrix pipeline")
     ap.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
-    global LIVE
+    global LIVE, ELEMENT_PROPS
     LIVE = args.live
+    ELEMENT_PROPS = args.props
     if args.child:
         return child()
 
@@ -161,17 +165,18 @@ def main():
         (f"3 talking, {n - 3} silent (GAP)", 3, True),
     ]
     mode = "live" if args.live else "as fast as possible"
-    print(f"{n} participants, {args.seconds} s of audio, {mode}; CPU % of one core (user + system), with the test")
+    props = f", acousticmultimixer {args.props}" if args.props else ""
+    print(f"{n} participants, {args.seconds} s of audio, {mode}{props}; CPU % of one core (user + system), with the test")
     print("sources' own cost (sources alone) subtracted\n")
     print("| case | sources alone | acousticmultimixer | matrix (audiointerleave + audiomixmatrix) |")
     print("|---|---|---|---|")
     for name, talking, gap in cases:
         base, _ = run(sources_only(n, talking, gap, buffers), env)
         results = []
-        for build in (ours, matrix):
+        for build in (ours,) if args.ours_only else (ours, matrix):
             cpu, _ = run(build(n, talking, gap, buffers), env)
             results.append(f"{100 * (cpu - base) / args.seconds:.1f} %")
-        print(f"| {name} | {100 * base / args.seconds:.1f} % | {results[0]} | {results[1]} |", flush=True)
+        print(f"| {name} | {100 * base / args.seconds:.1f} % | {' | '.join(results)} |", flush=True)
 
 
 if __name__ == "__main__":

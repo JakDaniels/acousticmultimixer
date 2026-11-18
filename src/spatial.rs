@@ -110,23 +110,27 @@ impl Orientation {
     }
 }
 
-/// How one source sounds to one listener: a level (0 = silent, out of the mix) and a pan (−1 left … 1 right).
+/// How one source sounds to one listener: a level (0 = silent, out of the mix), a pan (−1 left … 1 right: the
+/// sine of the source's angle from straight ahead), and the distance (0 without positions).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rendering {
     pub gain: f64,
     pub pan: f64,
+    pub distance: f64,
 }
 
 impl Rendering {
     pub const SILENT: Rendering = Rendering {
         gain: 0.0,
         pan: 0.0,
+        distance: 0.0,
     };
 
     /// Full volume, centred: a participant without a position.
     pub const CENTRE: Rendering = Rendering {
         gain: 1.0,
         pan: 0.0,
+        distance: 0.0,
     };
 
     /// Left and right gains. Constant power with the centre at unity on both channels (so a centred source is
@@ -175,7 +179,135 @@ pub fn render(
     } else {
         -left / horizontal
     };
-    Rendering { gain, pan }
+    Rendering {
+        gain,
+        pan,
+        distance,
+    }
+}
+
+/// How direction is heard.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, glib::Enum)]
+#[repr(u32)]
+#[enum_type(name = "GstAcousticMultiMixerDirectionModel")]
+pub enum DirectionModel {
+    /// Constant-power stereo pan: a source to one side is silent in the other ear (SpatialAudioServer's `matrix`
+    /// engine).
+    #[enum_value(
+        name = "Pan: constant-power stereo pan (silent in the far ear at the side)",
+        nick = "pan"
+    )]
+    Pan,
+
+    /// A head between the ears: the far ear hears the source later (ITD), quieter (ILD) and duller (head shadow).
+    #[default]
+    #[enum_value(
+        name = "Head: the far ear hears later, quieter and duller (ITD, ILD, head shadow)",
+        nick = "head"
+    )]
+    Head,
+}
+
+/// The element's acoustic settings beyond the distance curve.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Acoustics {
+    pub direction: DirectionModel,
+    /// High-frequency loss with distance, in dB per metre at 8 kHz (air: about 0.1); 0 = none.
+    pub air_absorption: f64,
+}
+
+impl Default for Acoustics {
+    fn default() -> Self {
+        Acoustics {
+            direction: DirectionModel::Head,
+            air_absorption: DEFAULT_AIR_ABSORPTION,
+        }
+    }
+}
+
+pub const DEFAULT_AIR_ABSORPTION: f64 = 0.1;
+
+/// Head model constants (to be tuned by ear). Woodworth's ITD for a spherical head: (r / c)(θ + sin θ), up to
+/// 0.66 ms at the side.
+const HEAD_RADIUS: f64 = 0.0875; // m
+const SPEED_OF_SOUND: f64 = 343.0; // m/s
+/// Broadband level difference at the side (design.md: −8 dB; less here, since the head shadow adds to it).
+const ILD_SIDE_DB: f64 = 6.0;
+/// Far-ear low-pass at the side (Hz), easing towards none straight ahead.
+const SHADOW_SIDE_HZ: f64 = 1800.0;
+/// Above this a low-pass is not worth running.
+pub const NO_FILTER_HZ: f64 = 18000.0;
+
+/// The longest ITD the head model gives, in seconds.
+pub const MAX_ITD: f64 = HEAD_RADIUS / SPEED_OF_SOUND * (std::f64::consts::FRAC_PI_2 + 1.0);
+
+/// What one ear gets of one source: a gain, a delay in seconds, and a one-pole low-pass cut-off in Hz (infinite =
+/// none).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ear {
+    pub gain: f64,
+    pub delay: f64,
+    pub cutoff: f64,
+}
+
+impl Ear {
+    pub const SILENT: Ear = Ear {
+        gain: 0.0,
+        delay: 0.0,
+        cutoff: f64::INFINITY,
+    };
+}
+
+/// The low-pass cut-off for air absorption over `distance` metres: a one-pole filter losing
+/// `db_per_metre × distance` dB at 8 kHz.
+fn air_cutoff(distance: f64, db_per_metre: f64) -> f64 {
+    let loss = db_per_metre * distance;
+    if loss <= 0.0 {
+        return f64::INFINITY;
+    }
+    8000.0 / (10f64.powf(loss / 10.0) - 1.0).sqrt()
+}
+
+/// Left and right ears for a rendering.
+pub fn ears(r: &Rendering, acoustics: &Acoustics) -> [Ear; 2] {
+    if r.gain <= 0.0 {
+        return [Ear::SILENT; 2];
+    }
+    let air = air_cutoff(r.distance, acoustics.air_absorption);
+    match acoustics.direction {
+        DirectionModel::Pan => {
+            let (l, r) = r.stereo();
+            [l, r].map(|gain| Ear {
+                gain,
+                delay: 0.0,
+                cutoff: air,
+            })
+        }
+        DirectionModel::Head => {
+            // s = sin of the lateral angle (0 ahead or behind, 1 at the side).
+            let s = r.pan.abs().min(1.0);
+            let near = Ear {
+                gain: r.gain,
+                delay: 0.0,
+                cutoff: air,
+            };
+            let lateral = s.asin();
+            let far = Ear {
+                gain: r.gain * 10f64.powf(-ILD_SIDE_DB * s / 20.0),
+                delay: HEAD_RADIUS / SPEED_OF_SOUND * (lateral + s),
+                cutoff: if s > 0.0 {
+                    (20000.0 * (SHADOW_SIDE_HZ / 20000.0).powf(s)).min(air)
+                } else {
+                    air
+                },
+            };
+            if r.pan > 0.0 {
+                [far, near]
+            } else {
+                [near, far]
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -233,18 +365,21 @@ mod tests {
         let (l, r) = Rendering {
             gain: 1.0,
             pan: 1.0,
+            distance: 0.0,
         }
         .stereo();
         assert!(close(l, 0.0) && close(r, 1.0));
         let (l, r) = Rendering {
             gain: 0.5,
             pan: -1.0,
+            distance: 0.0,
         }
         .stereo();
         assert!(close(l, 0.5) && close(r, 0.0));
         let (l, r) = Rendering {
             gain: 1.0,
             pan: 0.5,
+            distance: 0.0,
         }
         .stereo();
         assert!(l < 1.0 && close(r, 1.0));
@@ -370,5 +505,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn head_model_ears() {
+        let head = Acoustics {
+            direction: DirectionModel::Head,
+            air_absorption: 0.0,
+        };
+        // Straight ahead: both ears the same, no delay, no filter.
+        let [l, r] = ears(&Rendering::CENTRE, &head);
+        assert_eq!(l, r);
+        assert_eq!((l.gain, l.delay), (1.0, 0.0));
+        assert!(l.cutoff.is_infinite());
+        // Hard right: the left ear is later (0.66 ms), 6 dB down and low-passed at 1.8 kHz.
+        let [l, r] = ears(
+            &Rendering {
+                gain: 0.5,
+                pan: 1.0,
+                distance: 4.0,
+            },
+            &head,
+        );
+        assert_eq!((r.gain, r.delay), (0.5, 0.0));
+        assert!((l.delay - MAX_ITD).abs() < 1e-12 && (MAX_ITD - 0.000656).abs() < 1e-6);
+        assert!((db(l.gain / r.gain) + 6.0).abs() < 1e-9);
+        assert!((l.cutoff - 1800.0).abs() < 1e-6);
+        // Pan model: today's stereo gains, no delays.
+        let pan = Acoustics {
+            direction: DirectionModel::Pan,
+            air_absorption: 0.0,
+        };
+        let [l, r] = ears(
+            &Rendering {
+                gain: 1.0,
+                pan: 1.0,
+                distance: 4.0,
+            },
+            &pan,
+        );
+        assert!(l.gain.abs() < 1e-12);
+        assert_eq!((r.gain, l.delay, r.delay), (1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn air_absorption_dulls_with_distance() {
+        assert!(air_cutoff(0.0, 0.1).is_infinite());
+        assert!(air_cutoff(10.0, 0.0).is_infinite());
+        // 30 m at 0.1 dB/m: 3 dB down at 8 kHz, i.e. the cut-off is 8 kHz.
+        assert!((air_cutoff(30.0, 0.1) - 8000.0).abs() < 20.0);
+        assert!(air_cutoff(60.0, 0.1) < air_cutoff(10.0, 0.1));
     }
 }

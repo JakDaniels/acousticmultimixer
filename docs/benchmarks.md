@@ -11,6 +11,27 @@ side includes the Opus encoders or WebRTC, which cost the same either way.
 - **Quiet:** a sine at −80 dB, as decoded comfort noise: real audio to mix. **Silent (GAP):** buffers flagged GAP,
   which aggregators skip.
 
+## 2026-11-18: step 3 (head model and air absorption)
+
+Same machine. As fast as possible, 32 participants, 30 s, acousticmultimixer only (`--ours-only --props …`):
+
+| case | `pan`, no air | `pan` (air on) | `head` (first version) | `head` (final) |
+|---|---|---|---|---|
+| 32 talking | 24.3 % | 101.2 % | 102.7 % | 44.4 % |
+| 3 talking, 29 quiet | 23.6 % | 103.1 % | 101.5 % | 47.1 % |
+| 3 talking, 29 silent (GAP) | 18.0 % | 26.3 % | 26.0 % | 21.6 % |
+
+Any delay or filter on a path takes it off the plain-gain loop, so `pan` with air absorption costs as much as
+`head`. The final version loops across each frame's ears with the delays' offsets worked out once per buffer.
+
+Live, 32 participants, 20 s, defaults (`head`, air 0.1):
+
+| case | sources alone | acousticmultimixer | matrix |
+|---|---|---|---|
+| 32 talking | 13.4 % | 51.5 % | 28.3 % |
+| 3 talking, 29 quiet | 12.8 % | 47.1 % | 30.7 % |
+| 3 talking, 29 silent (GAP) | 9.6 % | 22.3 % | 27.0 % |
+
 ## 2026-11-18: step 2 (stereo, distance and pan)
 
 Machine: Intel Pentium Silver N6005 (4 cores, 2.0 GHz), Ubuntu 26.04, GStreamer 1.28.2, Rust 1.100.

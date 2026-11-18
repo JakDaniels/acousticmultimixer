@@ -7,8 +7,9 @@ shared virtual space by distance and direction, with early reflections and a sha
 being built for [SpatialAudioServer](https://github.com/JakDaniels/SpatialAudioServer), an audio conferencing server
 (MCU) with spatial audio, and is meant to be useful to any GStreamer application.
 
-**Status:** under development. Working now: mix-minus in stereo, with level by distance and pan by direction
-(SpatialAudioServer's formulas), per-person gain, mute and trims. Next: direction cues, reflections and reverb.
+**Status:** under development. Working now: mix-minus in stereo, with level by distance (SpatialAudioServer's
+formulas), direction by a simple head model (the far ear hears later, quieter and duller) or a stereo pan, air
+absorption, and per-person gain, mute and trims. Next: early reflections and reverb.
 The plan and the decisions: [PLAN.md](PLAN.md); the original design: [docs/design.md](docs/design.md); what
 changed: [CHANGELOG.md](CHANGELOG.md).
 

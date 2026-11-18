@@ -8,8 +8,9 @@ spatial rooms; the aim is for it to be generally useful and, in time, to be offe
 
 - The original design, with the DSP ideas and the cost analysis: [docs/design.md](docs/design.md). This plan
   holds the decisions; where they differ, this plan wins.
-- Status: **step 2 done** (2026-11-18): stereo mix-minus with distance and pan, parity with SpatialAudioServer's
-  `matrix` engine. Next: SpatialAudioServer's `acoustic` engine (its issue #8), then step 3.
+- Status: **step 3 done** (2026-11-18): the head model (ITD, ILD, head shadow) and air absorption, on top of
+  step 2's distance and pan; SpatialAudioServer's `acoustic` engine uses the element. Next: listening tests, then
+  step 4 (early reflections).
 
 ## 1. Decisions so far
 
@@ -141,8 +142,11 @@ gst-launch-1.0 acousticmultimixer name=m sink_1::y=4 sink_2::x=8 \
     unlinked `mix_N` is not mixed.
 - **Element properties:** `sample-rate` and `max-participants` (construct-only); the distance model
   (`distance-model` = `inverse`, `exponential` (default), `linear`; `reference-distance` 2, `rolloff` 1,
-  `max-range` 60: SpatialAudioServer's `outdoor` profile; its `meeting` profile is linear, 10, 2, 60); the
-  aggregator properties `minus1mixer` already proxies (`latency`, `force-live`, …). Later: `room`, `reverb-level`.
+  `max-range` 60: SpatialAudioServer's `outdoor` profile; its `meeting` profile is linear, 10, 2, 60);
+  `direction-model` (`head`, the default: the far ear later, quieter and duller; `pan`: a constant-power stereo
+  pan) and `air-absorption` (dB per metre at 8 kHz, default 0.1; `pan` with 0 is SpatialAudioServer's `matrix`
+  exactly); the aggregator properties `minus1mixer` already proxies (`latency`, `force-live`, …). Later: `room`,
+  `reverb-level`.
 - Property changes only mark the scene as changed. The gains are recomputed at most once per output buffer, and a
   changed path ramps linearly from the old value to the new one across that buffer (10 ms by default). A new
   participant, or an output just linked, starts at its values: there is nothing to click from.
@@ -247,6 +251,39 @@ everyone still receiving), and capacity (numbers reused, refusal when full or ou
 - **Distance colour:** distant voices lose high frequencies (air absorption) and gain more room sound: a
   low-pass by distance. This and the head shadow are per-path filters, so measure their cost against step 2.
 - Listening tests in SpatialAudioServer rooms with the load tool's voices (`--audio voices --spatial`).
+
+**Done (2026-11-18), listening tests to come.**
+- `direction-model=head` (the default): the near ear as before (gain from distance); the far ear later by
+  Woodworth's ITD for a spherical head, (r / c)(θ + sin θ), up to 0.66 ms at the side; quieter by up to 6 dB
+  (ILD; design.md suggested 8, less here because the shadow adds to it); and low-passed (head shadow), the cut-off
+  falling from none ahead to 1.8 kHz at the side. θ is the lateral angle, from the same pan as before (sin θ =
+  |pan|), so front and back are still alike. `direction-model=pan` keeps step 2's stereo pan. The constants
+  (`spatial.rs`) are first guesses, to tune by ear.
+- `air-absorption` (default 0.1 dB per metre at 8 kHz, roughly real air): a one-pole low-pass on both ears whose
+  loss at 8 kHz is that times the distance (30 m: cut-off 8 kHz; 60 m: 4.6 kHz). The far ear takes the lower of
+  its two cut-offs.
+- `dsp.rs`, free of GStreamer: per path and ear a gain, a delay and a one-pole low-pass; gains and delays ramp
+  across the buffer when they change (so a turning listener's delays glide); each speaker keeps a short history
+  (the longest ITD plus two samples), cleared, with the filters, after a gap in its input. A speaker whose paths
+  are all plain gains (no delay, no filter: unpositioned, or `pan` without air) keeps step 2's vectorised loop;
+  otherwise the loop runs across the ears of each output frame (the filters feed back in time, but the ears are
+  independent), with each ear's whole-sample offset and fraction worked out once per buffer when the delays are
+  not changing.
+- Cost (as fast as possible, 32 participants, all producing audio): `pan` 24 % of a core, `head` first 101 %, then
+  92 % (loop across ears), 57 % (offsets once per buffer), 44–47 % (no bounds checks in the inner loop). Live, 32
+  participants: 47–51 %, against 28–31 % for SpatialAudioServer's `matrix` mixing; with the 29 non-talkers
+  silent (GAP) 22 % against 27 %. What remains is reading each ear's delayed sample (a gather: no SIMD on this
+  CPU) and the filter.
+- Tests: the ear formulas; the DSP (fast loop, a delayed ear reading across buffers, a gap clearing the history,
+  the one-pole's step response, gain and delay ramps); through the element, the head model's far ear silent for
+  the ITD, then rising through the shadow and settling 6 dB down. Step 2's exact-value tests run with `pan` and no
+  air.
+- SpatialAudioServer: its spatial suite's "on the left" check required the far ear below −14 dB (a stereo pan's
+  silence); now −3 dB, which both models meet.
+- **To decide:** a silence gate. Participants who are not talking still produce audio (decoded comfort noise), and
+  with `head` every one of them costs as much as a talker: 47 % against 22 % when they are silent (GAP). Skipping
+  inputs whose buffer peaks below a threshold would make the cost follow the talkers, but changes what is heard
+  (the noise floor goes) and needs a threshold that never cuts quiet speech.
 
 ### Step 4: early reflections and room presets
 - Per path, a few taps (4 to start) from the speaker's history ring: delay and gain from the room preset and the

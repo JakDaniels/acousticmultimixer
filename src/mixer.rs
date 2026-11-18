@@ -36,89 +36,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use byte_slice_cast::*;
 
+use crate::dsp::Paths;
 use crate::scene::Scene;
-
-/// The gains for the output buffer being made: per speaker (row), `width` values (listener l's pair at 2l).
-#[derive(Default)]
-struct Gains {
-    width: usize,
-    /// At the start of the output buffer.
-    start: Vec<f32>,
-    /// At its end; equal to `start` unless something changed.
-    end: Vec<f32>,
-    /// (end - start) / frames, for rows that ramp.
-    step: Vec<f32>,
-    /// Per row: does it ramp in this buffer, and the range of columns that are not silent (lo..hi; empty when the
-    /// speaker is heard by nobody, so its input is skipped).
-    ramping: Vec<bool>,
-    span: Vec<(usize, usize)>,
-}
-
-impl Gains {
-    fn new(rows: usize, width: usize) -> Self {
-        Gains {
-            width,
-            start: vec![0.0; rows * width],
-            end: vec![0.0; rows * width],
-            step: vec![0.0; rows * width],
-            ramping: vec![false; rows],
-            span: vec![(0, 0); rows],
-        }
-    }
-
-    /// Moves on to a new output buffer of `frames` frames: the last buffer's end is this one's start, then the
-    /// scene's gains (if they changed) are this one's end.
-    fn next_buffer(&mut self, scene: &Mutex<Scene>, frames: usize) {
-        let was_ramping = self.ramping.iter().any(|&r| r);
-        let fresh = {
-            let mut scene = scene.lock().unwrap();
-            if !scene.dirty && !was_ramping {
-                // Nothing changed: start and end are already equal.
-                return;
-            }
-            self.start.copy_from_slice(&self.end);
-            if scene.dirty {
-                scene.compute(&mut self.end)
-            } else {
-                // Ramps just ended: no ramps now, and the spans may be narrower.
-                vec![]
-            }
-        };
-
-        // New speakers and new listeners start at their gains: there is nothing to click from.
-        let width = self.width;
-        for &n in &fresh {
-            let (s, e) = (
-                &mut self.start[n * width..][..width],
-                &self.end[n * width..][..width],
-            );
-            s.copy_from_slice(e);
-            for row in 0..self.ramping.len() {
-                for c in [2 * n, 2 * n + 1] {
-                    self.start[row * width + c] = self.end[row * width + c];
-                }
-            }
-        }
-
-        let inv_frames = 1.0 / frames.max(1) as f32;
-        for row in 0..self.ramping.len() {
-            let range = row * width..(row + 1) * width;
-            let (start, end) = (&self.start[range.clone()], &self.end[range.clone()]);
-            let ramping = start != end;
-            self.ramping[row] = ramping;
-            if ramping {
-                for ((d, &a), &b) in self.step[range].iter_mut().zip(start).zip(end) {
-                    *d = (b - a) * inv_frames;
-                }
-            }
-            let audible = |c: usize| start[c] != 0.0 || end[c] != 0.0;
-            self.span[row] = match (0..width).find(|&c| audible(c)) {
-                Some(lo) => (lo, (lo..width).rfind(|&c| audible(c)).unwrap() + 1),
-                None => (0, 0),
-            };
-        }
-    }
-}
 
 #[derive(Default)]
 struct State {
@@ -128,10 +47,12 @@ struct State {
 
     scene: Option<Arc<Mutex<Scene>>>,
 
-    gains: Gains,
+    // Rows (speakers) and width (output channels), from the scene.
+    rows: usize,
+    width: usize,
 
-    // Frames in the output buffer being made (for the ramps).
-    frames: usize,
+    // The paths and their state, once the sample rate is known.
+    paths: Option<Paths>,
 }
 
 #[derive(Default)]
@@ -231,6 +152,7 @@ impl AggregatorImpl for MultiMixerElement {
     fn stop(&self) -> Result<(), gst::ErrorMessage> {
         let mut state = self.state.lock().unwrap();
         state.configured_info = None;
+        state.paths = None;
         drop(state);
 
         self.parent_stop()
@@ -414,10 +336,24 @@ impl AudioAggregatorImpl for MultiMixerElement {
 
         let mut state = self.state.lock().unwrap();
         let state = &mut *state;
-        state.frames = num_frames as usize;
-        if let Some(scene) = &state.scene {
-            state.gains.next_buffer(scene, state.frames);
+        let (Some(scene), Some(rate)) = (
+            state.scene.clone(),
+            state.configured_info.as_ref().map(|i| i.rate() as f64),
+        ) else {
+            return Some(buf);
+        };
+        if state.paths.as_ref().is_none_or(|p| p.rate() != rate) {
+            state.paths = Some(Paths::new(state.rows, state.width, rate));
+            scene.lock().unwrap().dirty = true;
         }
+        state
+            .paths
+            .as_mut()
+            .unwrap()
+            .next_buffer(num_frames as usize, |table| {
+                let mut scene = scene.lock().unwrap();
+                scene.dirty.then(|| scene.compute(table))
+            });
 
         Some(buf)
     }
@@ -431,31 +367,25 @@ impl AudioAggregatorImpl for MultiMixerElement {
         out_offset: u32,
         num_frames: u32,
     ) -> bool {
-        let state = self.state.lock().unwrap();
-        let gains = &state.gains;
-        let width = gains.width;
+        let mut state = self.state.lock().unwrap();
+        let width = state.width;
+        let rows = state.rows;
+        let Some(paths) = state.paths.as_mut() else {
+            return true;
+        };
 
         let Some(n) = pad
             .name()
             .strip_prefix("sink_")
             .and_then(|n| n.parse::<usize>().ok())
-            .filter(|&n| n < gains.span.len())
+            .filter(|&n| n < rows)
         else {
             return true;
         };
 
-        // Heard by nobody (muted, out of range, alone, nobody listening): nothing to do.
-        let (lo, hi) = gains.span[n];
-        if lo == hi {
-            return true;
-        }
-
         let audio_info = pad.audio_info().expect("audioinfo");
         assert_eq!(audio_info.channels(), 1);
 
-        let row = n * width..(n + 1) * width;
-        let start = &gains.start[row.clone()][lo..hi];
-        let step = gains.ramping[n].then(|| &gains.step[row][lo..hi]);
         let in_offset = in_offset as usize;
         let out_offset = out_offset as usize;
         let num_frames = num_frames as usize;
@@ -463,8 +393,7 @@ impl AudioAggregatorImpl for MultiMixerElement {
         gst::log!(
             CAT,
             imp = self,
-            "input {n}: frames {num_frames} from {in_offset} to {out_offset}, columns {lo}..{hi}, ramping {}",
-            step.is_some()
+            "input {n}: frames {num_frames} from {in_offset} to {out_offset}"
         );
 
         let mut out_map = outbuf.map_writable().unwrap();
@@ -475,20 +404,11 @@ impl AudioAggregatorImpl for MultiMixerElement {
         match audio_info.format() {
             AudioFormat::F32le => {
                 let input = &in_map.as_slice_of::<f32>().unwrap()[in_offset..][..num_frames];
-                mix(input, 1.0, out, width, lo, start, step, out_offset);
+                paths.mix(n, input, 1.0, out, out_offset);
             }
             AudioFormat::S16le => {
                 let input = &in_map.as_slice_of::<i16>().unwrap()[in_offset..][..num_frames];
-                mix(
-                    input,
-                    1.0 / 32768.0,
-                    out,
-                    width,
-                    lo,
-                    start,
-                    step,
-                    out_offset,
-                );
+                paths.mix(n, input, 1.0 / 32768.0, out, out_offset);
             }
             format => unimplemented!("{format:?}"),
         }
@@ -497,55 +417,16 @@ impl AudioAggregatorImpl for MultiMixerElement {
     }
 }
 
-/// Adds one mono input into the output frames: for each sample x, columns lo..lo + start.len() of the frame get
-/// x × gain. The gains are `start`, or ramp as start + step × (k + 1) at output-buffer frame k (`first` is the
-/// first frame's index), reaching the end value on the buffer's last frame. Plain slices with no branches per
-/// sample, so the compiler vectorises the inner loops.
-#[allow(clippy::too_many_arguments)]
-#[inline]
-fn mix<T: Copy>(
-    input: &[T],
-    scale: f32,
-    out: &mut [f32],
-    width: usize,
-    lo: usize,
-    start: &[f32],
-    step: Option<&[f32]>,
-    first: usize,
-) where
-    f32: From<T>,
-{
-    let hi = lo + start.len();
-    match step {
-        None => {
-            for (frame, &x) in out.chunks_exact_mut(width).zip(input) {
-                let x = f32::from(x) * scale;
-                for (o, &g) in frame[lo..hi].iter_mut().zip(start) {
-                    *o += x * g;
-                }
-            }
-        }
-        Some(step) => {
-            for (i, (frame, &x)) in out.chunks_exact_mut(width).zip(input).enumerate() {
-                let x = f32::from(x) * scale;
-                let k = (first + i + 1) as f32;
-                for ((o, &g), &d) in frame[lo..hi].iter_mut().zip(start).zip(step) {
-                    *o += x * (g + d * k);
-                }
-            }
-        }
-    }
-}
-
 impl MultiMixerElement {
     /// Gives the mixer its scene, which fixes its output width. Called once, by the bin, before it runs.
     pub(crate) fn set_scene(&self, scene: Arc<Mutex<Scene>>) {
         let mut state = self.state.lock().unwrap();
-        let (rows, width) = {
+        {
             let s = scene.lock().unwrap();
-            (s.participants.len(), s.width())
-        };
-        state.gains = Gains::new(rows, width);
+            state.rows = s.participants.len();
+            state.width = s.width();
+        }
+        state.paths = None;
         state.scene = Some(scene);
     }
 }

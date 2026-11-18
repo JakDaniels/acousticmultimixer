@@ -39,6 +39,10 @@ impl Room {
             .property("output-buffer-duration", 10.mseconds())
             .build()
             .unwrap();
+        // The exact values below are the stereo pan's (SpatialAudioServer's matrix); the head model has its own
+        // tests.
+        mixer.set_property_from_str("direction-model", "pan");
+        mixer.set_property("air-absorption", 0.0);
         configure(&mixer);
         pipeline.add(&mixer).unwrap();
 
@@ -315,4 +319,33 @@ fn pad_properties_from_launch_syntax() {
         .unwrap()
         .property::<gst::Structure>("trims");
     assert_eq!(trims.get::<f64>("sink_0").unwrap(), 0.25);
+}
+
+#[test]
+fn head_model_delays_and_quietens_the_far_ear() {
+    let mut room = Room::new(&[true, true], |m| {
+        m.set_property_from_str("direction-model", "head");
+    });
+    place(room.pad(0), 0.0, 0.0, 0.0);
+    place(room.pad(1), 0.0, -2.0, 0.0); // 2 m to 0's right: full level, hard right
+
+    // From silence, a constant: the right ear has it at once; the left ear 0.66 ms (31.5 samples) later, then
+    // rising through the head-shadow low-pass.
+    let out = room.step(&[0.0, 1.0]);
+    let frames: Vec<_> = out[0].as_ref().unwrap().as_chunks::<2>().0.to_vec();
+    assert!(
+        frames.iter().all(|f| (f[1] - 1.0).abs() < 1e-6),
+        "right ear"
+    );
+    assert!(
+        frames[..31].iter().all(|f| f[0] == 0.0),
+        "left ear before the ITD"
+    );
+    assert!(frames[33][0] > 0.0, "left ear after the ITD");
+
+    // Settled: the left ear is 6 dB down (a low-pass passes a constant unchanged).
+    room.step(&[0.0, 1.0]);
+    let out = room.step(&[0.0, 1.0]);
+    let expected = 10f64.powf(-6.0 / 20.0);
+    assert_constant(out[0].as_ref().unwrap(), (expected, 1.0), "settled");
 }

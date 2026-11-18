@@ -13,6 +13,7 @@ use gst::glib;
 use gst::prelude::*;
 
 mod acousticmultimixer;
+mod dsp;
 mod mixer;
 mod pad;
 mod scene;
@@ -40,6 +41,7 @@ fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     // of its interface.
     AcousticMultiMixerPad::static_type().mark_as_plugin_api(gst::PluginAPIFlags::empty());
     spatial::DistanceModel::static_type().mark_as_plugin_api(gst::PluginAPIFlags::empty());
+    spatial::DirectionModel::static_type().mark_as_plugin_api(gst::PluginAPIFlags::empty());
 
     gst::Element::register(
         Some(plugin),

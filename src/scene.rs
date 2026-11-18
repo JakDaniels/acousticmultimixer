@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::spatial::{DistanceParams, Orientation, render};
+use crate::spatial::{Acoustics, DistanceParams, Orientation, ears, render};
 
 /// Largest gain (and per-listener trim) accepted: +20 dB.
 pub const MAX_GAIN: f64 = 10.0;
@@ -76,6 +76,7 @@ impl Participant {
 pub struct Scene {
     pub participants: Vec<Participant>,
     pub params: DistanceParams,
+    pub acoustics: Acoustics,
     /// Something changed since the gains were last computed.
     pub dirty: bool,
 }
@@ -85,6 +86,7 @@ impl Scene {
         Scene {
             participants: vec![Participant::default(); max_participants],
             params: DistanceParams::default(),
+            acoustics: Acoustics::default(),
             dirty: true,
         }
     }
@@ -121,18 +123,17 @@ impl Scene {
         }
     }
 
-    /// Writes every path's left/right gains into `gains`, one row per speaker of `width()` values (listener l's
-    /// pair at 2l, 2l + 1), and returns the participants that are fresh (clearing the flag).
-    pub fn compute(&mut self, gains: &mut [f32]) -> Vec<usize> {
+    /// Writes every path into `paths` (one row per speaker of `width()` values, listener l's ears at 2l and 2l + 1)
+    /// and returns the participants that are fresh (clearing the flag).
+    pub fn compute(&mut self, paths: &mut PathTable) -> Vec<usize> {
         let width = self.width();
-        assert_eq!(gains.len(), self.participants.len() * width);
-        gains.fill(0.0);
+        assert_eq!(paths.gain.len(), self.participants.len() * width);
+        paths.clear();
 
         for (s, speaker) in self.participants.iter().enumerate() {
             if !speaker.active || speaker.mute || speaker.gain <= 0.0 {
                 continue;
             }
-            let row = &mut gains[s * width..][..width];
             for (l, listener) in self.participants.iter().enumerate() {
                 if l == s || !listener.active || !listener.listening {
                     continue;
@@ -141,14 +142,14 @@ impl Scene {
                 if trim <= 0.0 {
                     continue;
                 }
-                let r = render(speaker.speaker(), listener.listener(), &self.params);
-                if r.gain <= 0.0 {
-                    continue;
+                let mut r = render(speaker.speaker(), listener.listener(), &self.params);
+                r.gain *= speaker.gain * trim;
+                for (ear, e) in ears(&r, &self.acoustics).into_iter().enumerate() {
+                    let i = s * width + 2 * l + ear;
+                    paths.gain[i] = e.gain as f32;
+                    paths.delay[i] = e.delay as f32;
+                    paths.cutoff[i] = e.cutoff as f32;
                 }
-                let (left, right) = r.stereo();
-                let g = speaker.gain * trim;
-                row[2 * l] = (left * g) as f32;
-                row[2 * l + 1] = (right * g) as f32;
             }
         }
 
@@ -164,12 +165,40 @@ impl Scene {
     }
 }
 
+/// Every path's ears, one row per speaker of `Scene::width()` values: gain, delay (seconds) and low-pass cut-off
+/// (Hz; infinite = none).
+#[derive(Debug, Clone)]
+pub struct PathTable {
+    pub gain: Vec<f32>,
+    pub delay: Vec<f32>,
+    pub cutoff: Vec<f32>,
+}
+
+impl PathTable {
+    pub fn new(len: usize) -> Self {
+        PathTable {
+            gain: vec![0.0; len],
+            delay: vec![0.0; len],
+            cutoff: vec![f32::INFINITY; len],
+        }
+    }
+
+    fn clear(&mut self) {
+        self.gain.fill(0.0);
+        self.delay.fill(0.0);
+        self.cutoff.fill(f32::INFINITY);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn pair(gains: &[f32], width: usize, s: usize, l: usize) -> (f32, f32) {
-        (gains[s * width + 2 * l], gains[s * width + 2 * l + 1])
+    fn pair(paths: &PathTable, width: usize, s: usize, l: usize) -> (f32, f32) {
+        (
+            paths.gain[s * width + 2 * l],
+            paths.gain[s * width + 2 * l + 1],
+        )
     }
 
     #[test]
@@ -180,7 +209,7 @@ mod tests {
             scene.set_listening(n, true);
         }
         let width = scene.width();
-        let mut gains = vec![0.0; 4 * width];
+        let mut gains = PathTable::new(4 * width);
         assert_eq!(scene.compute(&mut gains), [0, 1, 2]);
 
         // Nobody hears themselves; unpositioned is centred, full volume.
@@ -211,6 +240,8 @@ mod tests {
     #[test]
     fn positions() {
         let mut scene = Scene::new(2);
+        scene.acoustics.direction = crate::spatial::DirectionModel::Pan;
+        scene.acoustics.air_absorption = 0.0;
         for n in 0..2 {
             scene.join(n);
             scene.set_listening(n, true);
@@ -219,7 +250,7 @@ mod tests {
         // 1 is 4 m to the left of 0 (who faces +x).
         scene.participants[1].position = [0.0, 4.0, 0.0];
         let width = scene.width();
-        let mut gains = vec![0.0; 2 * width];
+        let mut gains = PathTable::new(2 * width);
         scene.compute(&mut gains);
         assert_eq!(pair(&gains, width, 1, 0), (0.5, 0.0));
 
