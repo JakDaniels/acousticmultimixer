@@ -8,8 +8,8 @@ spatial rooms; the aim is for it to be generally useful and, in time, to be offe
 
 - The original design, with the DSP ideas and the cost analysis: [docs/design.md](docs/design.md). This plan
   holds the decisions; where they differ, this plan wins.
-- Status: **step 4 done** (2026-11-18): early reflections and room presets, on top of step 3's head model and
-  step 2's distance and pan; SpatialAudioServer's `acoustic` engine uses the element, and its rooms choose a preset.
+- Status: **step 5 done** (2026-11-19): late reverb per voice, on top of step 4's early
+  reflections and room presets, step 3's head model and step 2's distance and pan; SpatialAudioServer's `acoustic` engine uses the element, and its rooms choose a preset.
   Open work is in this repository's GitHub issues (on the shared project board,
   https://github.com/users/JakDaniels/projects/1); this plan keeps the design and the decisions, and links to them:
   step 5, late reverb (#1); the silence gate (#2); geometry (#3); step 6, packaging (#4).
@@ -336,6 +336,41 @@ is seamless).
 
   Measure the first option; it keeps the design's "shared" saving and stays correct.
 - Denormals: flush to zero (or add a tiny offset) in decaying tails.
+
+**Done (2026-11-19), listening-tested from Firestorm** (after the tuning below; no stutter with six talking
+bots).
+- Changed from the above (agreed 2026-11-19): not a room total minus each listener's own tail, but each voice's
+  tail added to its two diffuse reflection signals. It then reaches each listener at that path's diffuse level:
+  it falls with distance like the reflections (in a region-wide voice room a constant-level tail would
+  bring in everyone's voice from 100 m away), per-person trims and mute apply, the speaker never hears their own,
+  and it costs nothing per listener, only the network per voice.
+- `reverb.rs`: a feedback delay network of eight lines (lengths the room's size times spread ratios, rounded to
+  distinct primes), mixed by an 8-point Hadamard matrix; each line's feedback is a one-pole low-pass whose gains at
+  DC and at the top of the band give the room's bass and treble decay times (Jot's approach, simplified). Input
+  fed with mixed signs; the left ear hears the even lines, the right the odd ones, so the tail is wide. The input
+  gain is worked out from the level, decay time and mean line length (tested within 1.5 dB). Values below 1e-15
+  in the filters are flushed to zero, so fading tails never reach denormals and end in exact silence.
+- Presets (bass decay / treble decay / level against the direct sound at the reference distance / size):
+  small-room 0.4 s / 0.15 s / −15 dB / 12 ms; hall 1.1 s / 0.35 s / −15 dB / 45 ms; cave 1.8 s / 0.5 s / −13 dB /
+  70 ms. The first values (hall 1.6 s at −9 dB, cave 3 s at −6 dB) were too strong and long by ear.
+- The cave's taps were step 4's 80/140/220/430 ms: walls 14–74 m away, gaps of 60–210 ms heard as separate
+  echoes. Now 25/45/70/110 ms (walls about 4–19 m away, a chamber 25–35 m across; gaps under 50 ms blend), with a
+  70 ms network size to match; the long dark tail is what sets it apart from the hall.
+- Reflections and reverb now fall at three quarters of the direct sound's rate in dB (`ROOM_FALLOFF`), not half:
+  at half, a voice 58 m away was still at −15 dB of room sound (direct −29 dB) until the 60 m cut-off.
+- Denormals: the one-pole filters (per-ear, from step 3, and the walls', from step 4) fed exact silence after
+  sound decayed into denormals and could stay on one for good; with six voices that cost 40 times as much (50 %
+  of a core live, stuttering, worst while walking, as ramps take the slower loop). The benchmark missed it: its
+  quiet sources are never exactly zero. Fixed by flushing denormals to zero while mixing (`FlushDenormals`:
+  MXCSR FTZ+DAZ on x86-64, FPCR FZ on ARM64, restored afterwards); the network also flushes its own filters.
+- `taper` (0.75): every distance curve fades out (raised cosine) from that fraction of `max-range` to silence at
+  it; a voice was still clearly heard just inside the range, then cut off. SpatialAudioServer's distance policy
+  does the same (`Media:Spatial:Taper`).
+- `reverb-level` (dB against the preset, −60…+12; −60 turns it off and frees its state). Memory: a cave's lines
+  are about 42,000 samples per voice (170 KB; 5.4 MB at 32).
+- Cost: +9 % of a core at 32 participants (54 → 64 %, as fast as possible), the same for every preset; within
+  the 10–15 % estimated.
+- Same known limit as the reflections: GAP input clears a voice's network, cutting its tail.
 
 ### Step 6: packaging and releases (#4)
 - As design.md "Packaging": `.deb`/`.rpm` (`gstreamer1.0-acousticmultimixer`, Fedora `gstreamer1-acousticmultimixer`)

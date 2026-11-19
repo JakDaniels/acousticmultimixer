@@ -12,7 +12,11 @@
 //! made once, from a longer ring of its input, as three signals (the part heard from its direction, and the parts
 //! heard from all around in the left and in the right ear), low-passed for the walls; each path then adds them with
 //! its own two levels per ear.
+//!
+//! Late reverb: each speaker's tail (from its own delay network, see `reverb`) is added to its two diffuse signals,
+//! so it reaches each listener at that path's diffuse level, and never the speaker themselves.
 
+use crate::reverb::{self, Network};
 use crate::rooms::{Room, SPREAD, diffuse_share};
 use crate::scene::PathTable;
 use crate::spatial::{MAX_ITD, NO_FILTER_HZ};
@@ -112,6 +116,11 @@ pub struct Paths {
     ring: Vec<Vec<f32>>,
     ring_at: Vec<usize>,
     wall: Vec<[f32; 3]>,
+    /// The room's reverb (none outdoors, or turned down to nothing), its level (1 = the preset's), and each
+    /// speaker's.
+    reverb: Option<Network>,
+    reverb_level: f32,
+    reverb_state: Vec<reverb::State>,
     /// Scratch: one call's reflection signals.
     reflections: [Vec<f32>; 3],
     /// Output frame at which the current buffer starts, and its length.
@@ -155,6 +164,9 @@ impl Paths {
             ring: vec![vec![]; rows],
             ring_at: vec![0; rows],
             wall: vec![[0.0; 3]; rows],
+            reverb: None,
+            reverb_level: 1.0,
+            reverb_state: vec![reverb::State::default(); rows],
             reflections: Default::default(),
             buffer_pos: 0,
             frames: 0,
@@ -245,15 +257,31 @@ impl Paths {
         }
         self.reflect_end.copy_from_slice(&self.table.reflect);
         self.diffuse_end.copy_from_slice(&self.table.diffuse);
-        if self.table.room != self.room {
-            // A new room: its taps, and rings long enough for them (empty outdoors), starting silent.
+        let level = self.table.reverb;
+        if self.table.room != self.room || (level == 0.0) != (self.reverb_level == 0.0) {
+            // A new room (or its reverb turned on or off): its taps, and rings long enough for them (empty
+            // outdoors), and its reverb, all starting silent.
             self.room = self.table.room;
             self.taps = Taps::new(self.room, self.rate);
+            self.reverb = self
+                .room
+                .preset()
+                .reverb
+                .filter(|_| level > 0.0)
+                .map(|r| Network::new(&r, self.rate));
             for row in 0..self.rows {
                 self.ring[row] = vec![0.0; self.taps.ring_len];
                 self.ring_at[row] = 0;
                 self.wall[row] = [0.0; 3];
+                self.reverb_state[row] = self
+                    .reverb
+                    .as_ref()
+                    .map_or_else(reverb::State::default, Network::state);
             }
+        }
+        self.reverb_level = level;
+        if let Some(net) = &mut self.reverb {
+            net.set_level(level);
         }
         let width = self.width;
         for &n in fresh {
@@ -287,6 +315,7 @@ impl Paths {
     ) where
         f32: From<T>,
     {
+        let _flush = FlushDenormals::new();
         let n = input.len();
         let width = self.width;
         let h = self.history_len;
@@ -299,6 +328,7 @@ impl Paths {
             self.filter[row * width..(row + 1) * width].fill(0.0);
             self.ring[row].fill(0.0);
             self.wall[row] = [0.0; 3];
+            self.reverb_state[row].clear();
         }
         self.next_pos[row] = pos + n as u64;
         let mut work = std::mem::take(&mut self.work);
@@ -346,7 +376,7 @@ impl Paths {
             }
         }
 
-        if self.taps.any() {
+        if self.taps.any() || self.reverb.is_some() {
             self.reflect(row, &work[h..h + n]);
             if lo < hi {
                 let r = row * width;
@@ -383,20 +413,27 @@ impl Paths {
 
 impl Paths {
     /// Writes a speaker's input into its ring and makes its three reflection signals for those frames (into
-    /// `self.reflections`): each tap read that far back in the ring, summed with its gains, low-passed for the walls.
+    /// `self.reflections`): each tap read that far back in the ring, summed with its gains, low-passed for the walls;
+    /// then adds its reverb to the diffuse ones.
     fn reflect(&mut self, row: usize, input: &[f32]) {
         let n = input.len();
+        for signal in &mut self.reflections {
+            signal.clear();
+            signal.resize(n, 0.0);
+        }
+        let [centre, left, right] = &mut self.reflections;
+        if let Some(net) = &self.reverb {
+            net.run(&mut self.reverb_state[row], input, left, right);
+        }
+        if !self.taps.any() {
+            return;
+        }
         let taps = &self.taps;
         let ring = &mut self.ring[row];
         let mask = ring.len() - 1;
         let mut at = self.ring_at[row];
         let [y0, y1, y2] = &mut self.wall[row];
         let a = taps.pole;
-        for signal in &mut self.reflections {
-            signal.clear();
-            signal.resize(n, 0.0);
-        }
-        let [centre, left, right] = &mut self.reflections;
         for (k, &x) in input.iter().enumerate() {
             ring[at & mask] = x;
             let (mut c, mut l, mut r) = (0.0, 0.0, 0.0);
@@ -409,8 +446,8 @@ impl Paths {
             *y1 += a * (l - *y1);
             *y2 += a * (r - *y2);
             centre[k] = *y0;
-            left[k] = *y1;
-            right[k] = *y2;
+            left[k] += *y1;
+            right[k] += *y2;
             at = at.wrapping_add(1);
         }
         self.ring_at[row] = at;
@@ -460,6 +497,60 @@ fn mix_reflections(
                         + (diffuse[b] + diffuse_step[b] * t) * r;
                 }
             }
+        }
+    }
+}
+
+/// While alive, the CPU treats denormal numbers as zero (x86-64: MXCSR's FTZ and DAZ; ARM64: FPCR's FZ), and puts
+/// back what it had when dropped. A one-pole filter whose input falls to exact silence otherwise decays into
+/// denormals and can stay on the smallest one for good (y − a·y rounds back to y), and every operation on a
+/// denormal is many times slower: measured, mixing six voices after they fell silent cost 40 times as much.
+struct FlushDenormals {
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    saved: u64,
+}
+
+impl FlushDenormals {
+    #[cfg(target_arch = "x86_64")]
+    fn new() -> Self {
+        let mut csr: u32 = 0;
+        // SAFETY: reads and writes this thread's SSE control register only.
+        unsafe {
+            std::arch::asm!("stmxcsr [{}]", in(reg) &mut csr, options(nostack));
+            let flushing = csr | 0x8040; // FTZ (bit 15), DAZ (bit 6)
+            std::arch::asm!("ldmxcsr [{}]", in(reg) &flushing, options(nostack));
+        }
+        FlushDenormals { saved: csr as u64 }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn new() -> Self {
+        let fpcr: u64;
+        // SAFETY: reads and writes this thread's floating-point control register only.
+        unsafe {
+            std::arch::asm!("mrs {}, fpcr", out(reg) fpcr, options(nomem, nostack));
+            std::arch::asm!("msr fpcr, {}", in(reg) fpcr | (1 << 24), options(nomem, nostack));
+        }
+        FlushDenormals { saved: fpcr }
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    fn new() -> Self {
+        FlushDenormals {}
+    }
+}
+
+impl Drop for FlushDenormals {
+    fn drop(&mut self) {
+        // SAFETY: puts back the value read in new().
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            let csr = self.saved as u32;
+            std::arch::asm!("ldmxcsr [{}]", in(reg) &csr, options(nostack));
+        }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            std::arch::asm!("msr fpcr, {}", in(reg) self.saved, options(nomem, nostack));
         }
     }
 }
@@ -707,6 +798,32 @@ mod tests {
     }
 
     #[test]
+    fn filters_never_hold_denormals_in_silence() {
+        // A low-passed, delayed ear and a cave's walls (their pole leaves a stuck denormal without flushing).
+        let mut p = Paths::new(2, 4, RATE);
+        p.next_buffer(480, |t| {
+            for c in [2, 3] {
+                t.gain[c] = 1.0;
+                t.delay[c] = 0.0002;
+                t.cutoff[c] = 3000.0;
+                t.diffuse[c] = 1.0;
+            }
+            t.room = Room::Cave;
+            t.reverb = 0.0;
+            Some(vec![0, 1])
+        });
+        run(&mut p, &[0.5; 480]);
+        for _ in 0..200 {
+            p.next_buffer(480, |_| None);
+            run(&mut p, &[0.0; 480]);
+        }
+        // Settled at zero or a tiny normal number (y − a·y rounds a denormal step away), never a denormal.
+        let settled = |y: &f32| *y == 0.0 || (y.is_normal() && y.abs() < 1e-30);
+        assert!(p.filter.iter().all(settled), "{:?}", p.filter);
+        assert!(p.wall[0].iter().all(settled), "{:?}", p.wall[0]);
+    }
+
+    #[test]
     fn reflections_arrive_at_the_taps_delays() {
         let mut p = Paths::new(2, 4, RATE);
         p.next_buffer(512, |t| {
@@ -716,10 +833,11 @@ mod tests {
                 t.diffuse[c] = 1.0;
             }
             t.room = Room::Cave;
+            t.reverb = 0.0; // the taps alone
             Some(vec![0, 1])
         });
-        // An impulse: the direct sound at 0, then nothing until the first tap (80 ms, the left diffuse copy 8 %
-        // earlier: 3533 samples), which is beyond this buffer.
+        // An impulse: the direct sound at 0, then nothing until the first tap (25 ms, the left diffuse copy 8 %
+        // earlier: 1104 samples), which is beyond this buffer.
         let mut input = vec![0.0; 512];
         input[0] = 1.0;
         let out = run(&mut p, &input);
@@ -728,7 +846,7 @@ mod tests {
         assert!(left[1..].iter().all(|&y| y == 0.0));
         // Silence until just before the first tap's left copy, then its response through the walls' filter.
         let mut at = 512;
-        let first = (0.080 * 0.92 * RATE).round() as usize;
+        let first = (0.025 * 0.92 * RATE).round() as usize;
         while at + 512 <= first {
             p.next_buffer(512, |_| None);
             assert!(

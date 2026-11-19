@@ -16,6 +16,7 @@ mod acousticmultimixer;
 mod dsp;
 mod mixer;
 mod pad;
+mod reverb;
 mod rooms;
 mod scene;
 mod spatial;

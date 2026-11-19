@@ -354,6 +354,8 @@ fn head_model_delays_and_quietens_the_far_ear() {
 fn room_adds_early_reflections() {
     let mut room = Room::new(&[true, true], |m| {
         m.set_property_from_str("room", "small-room");
+        // The reflections alone (a constant would set the reverb ringing for seconds).
+        m.set_property("reverb-level", -60.0);
     });
     place(room.pad(0), 0.0, 0.0, 0.0);
     place(room.pad(1), 2.0, 0.0, 0.0); // 2 m ahead: full level, centred
@@ -387,4 +389,41 @@ fn room_adds_early_reflections() {
     room.step(&[0.0, 1.0]);
     let out = room.step(&[0.0, 1.0]);
     assert_constant(out[0].as_ref().unwrap(), (1.0, 1.0), "outdoor");
+}
+
+#[test]
+fn room_adds_a_reverb_tail_but_not_your_own() {
+    let mut room = Room::new(&[true, true], |m| {
+        m.set_property_from_str("room", "small-room");
+    });
+    place(room.pad(0), 0.0, 0.0, 0.0);
+    place(room.pad(1), 2.0, 0.0, 0.0);
+    let energy = |out: &[f32]| out.iter().map(|&v| (v as f64).powi(2)).sum::<f64>();
+
+    // 10 ms of sound from participant 1, then silence. The reflections are over by 40 ms (the last tap is 17 ms
+    // late); the tail goes on, in both ears, and participant 1 never hears it.
+    let mut tail = [0.0; 2];
+    for k in 0..30 {
+        let out = room.step(&[0.0, if k == 0 { 1.0 } else { 0.0 }]);
+        assert!(
+            out[1].as_ref().unwrap().iter().all(|&v| v == 0.0),
+            "own voice"
+        );
+        if k >= 4 {
+            for frame in out[0].as_ref().unwrap().as_chunks::<2>().0 {
+                tail[0] += (frame[0] as f64).powi(2);
+                tail[1] += (frame[1] as f64).powi(2);
+            }
+        }
+    }
+    assert!(tail[0] > 1e-3 && tail[1] > 1e-3, "tail {tail:?}");
+
+    // Turned off: nothing (audible) after the reflections.
+    room.mixer.set_property("reverb-level", -60.0);
+    for k in 0..10 {
+        let out = room.step(&[0.0, if k == 0 { 1.0 } else { 0.0 }]);
+        if k >= 4 {
+            assert!(energy(out[0].as_ref().unwrap()) < 1e-20, "no tail");
+        }
+    }
 }

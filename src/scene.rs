@@ -10,6 +10,10 @@ use std::collections::BTreeMap;
 use crate::rooms::Room;
 use crate::spatial::{Acoustics, DistanceParams, Orientation, ears, render};
 
+/// How fast a voice's reflections and reverb fall with distance, against its direct sound (in dB). Half (as at
+/// first) left distant voices too loud right up to the edge of the range.
+const ROOM_FALLOFF: f64 = 0.75;
+
 /// Largest gain (and per-listener trim) accepted: +20 dB.
 pub const MAX_GAIN: f64 = 10.0;
 
@@ -131,7 +135,9 @@ impl Scene {
         assert_eq!(paths.gain.len(), self.participants.len() * width);
         paths.clear();
         paths.room = self.acoustics.room;
-        let reflecting = !self.acoustics.room.preset().taps.is_empty();
+        paths.reverb = self.acoustics.reverb_factor() as f32;
+        let preset = self.acoustics.room.preset();
+        let reflecting = !preset.taps.is_empty() || preset.reverb.is_some();
 
         for (s, speaker) in self.participants.iter().enumerate() {
             if !speaker.active || speaker.mute || speaker.gain <= 0.0 {
@@ -146,9 +152,9 @@ impl Scene {
                     continue;
                 }
                 let mut r = render(speaker.speaker(), listener.listener(), &self.params);
-                // Reflections fall off with distance at half the direct sound's rate (in dB), so the further
-                // away a voice is, the more of it is the room.
-                let reflected = r.gain.sqrt() * speaker.gain * trim;
+                // Reflections and reverb fall off with distance at three quarters of the direct sound's rate (in
+                // dB), so the further away a voice is, the more of it is the room, yet it still fades.
+                let reflected = r.gain.powf(ROOM_FALLOFF) * speaker.gain * trim;
                 r.gain *= speaker.gain * trim;
                 for (ear, e) in ears(&r, &self.acoustics).into_iter().enumerate() {
                     let i = s * width + 2 * l + ear;
@@ -179,7 +185,8 @@ impl Scene {
 
 /// Every path's ears, one row per speaker of `Scene::width()` values: the direct sound's gain, delay (seconds) and
 /// low-pass cut-off (Hz; infinite = none), and the levels of the room's reflections (`reflect` for the part heard
-/// from the voice's direction, `diffuse` for the part heard from all around), with the room they are for.
+/// from the voice's direction, `diffuse` for the part heard from all around, with the late reverb), with the room
+/// they are for and its reverb's level (1 = the preset's, 0 = none).
 #[derive(Debug, Clone)]
 pub struct PathTable {
     pub gain: Vec<f32>,
@@ -188,6 +195,7 @@ pub struct PathTable {
     pub reflect: Vec<f32>,
     pub diffuse: Vec<f32>,
     pub room: Room,
+    pub reverb: f32,
 }
 
 impl PathTable {
@@ -199,6 +207,7 @@ impl PathTable {
             reflect: vec![0.0; len],
             diffuse: vec![0.0; len],
             room: Room::default(),
+            reverb: 1.0,
         }
     }
 
@@ -286,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn reflections_fall_off_at_half_the_rate() {
+    fn reflections_fall_off_at_three_quarters_of_the_rate() {
         let mut scene = Scene::new(2);
         scene.acoustics.direction = crate::spatial::DirectionModel::Pan;
         scene.acoustics.air_absorption = 0.0;
@@ -307,17 +316,18 @@ mod tests {
                 .chain(&paths.diffuse)
                 .all(|&v| v == 0.0)
         );
-        // 8 m away in a hall: the direct sound is 12 dB down (outdoor curve), the reflections 6 dB.
+        // 8 m away in a hall: the direct sound is 12 dB down (outdoor curve), the reflections 9 dB.
         scene.acoustics.room = Room::Hall;
         scene.compute(&mut paths);
         assert_eq!(paths.room, Room::Hall);
         let i = width; // speaker 1, listener 0's left ear
         assert!((paths.gain[i] - 0.25).abs() < 1e-6);
-        assert!((paths.diffuse[i] - 0.5).abs() < 1e-6 && (paths.reflect[i] - 0.5).abs() < 1e-6);
+        let room = 0.25f32.powf(0.75);
+        assert!((paths.diffuse[i] - room).abs() < 1e-6 && (paths.reflect[i] - room).abs() < 1e-6);
         // To the left: the directional part follows the ears (silent on the right with a pan), the diffuse not.
         scene.participants[1].position = [0.0, 8.0, 0.0];
         scene.compute(&mut paths);
-        assert!((paths.reflect[i] - 0.5).abs() < 1e-6 && paths.reflect[i + 1].abs() < 1e-6);
-        assert!((paths.diffuse[i + 1] - 0.5).abs() < 1e-6);
+        assert!((paths.reflect[i] - room).abs() < 1e-6 && paths.reflect[i + 1].abs() < 1e-6);
+        assert!((paths.diffuse[i + 1] - room).abs() < 1e-6);
     }
 }

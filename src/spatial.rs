@@ -49,6 +49,9 @@ pub struct DistanceParams {
     pub rolloff: f64,
     /// Beyond this distance a source is silent and left out of the mix.
     pub max_range: f64,
+    /// Where (a fraction of `max_range`) the level starts fading smoothly to silence at `max_range`, so voices do
+    /// not cut off there; 1 = no fade.
+    pub taper: f64,
 }
 
 impl Default for DistanceParams {
@@ -58,13 +61,34 @@ impl Default for DistanceParams {
             reference: 2.0,
             rolloff: 1.0,
             max_range: 60.0,
+            taper: DEFAULT_TAPER,
         }
     }
 }
 
+/// Voices fade out over the last quarter of the range.
+pub const DEFAULT_TAPER: f64 = 0.75;
+
 impl DistanceParams {
-    /// The distance model's gain, 0 to 1.
+    /// The distance model's gain, 0 to 1, with the fade towards the end of the range.
     pub fn attenuation(&self, distance: f64) -> f64 {
+        self.curve(distance) * self.fade(distance)
+    }
+
+    /// 1, then a raised cosine from `taper × max_range` down to 0 at `max_range`.
+    fn fade(&self, distance: f64) -> f64 {
+        let start = self.taper * self.max_range;
+        if self.taper >= 1.0 || distance <= start {
+            1.0
+        } else if distance >= self.max_range {
+            0.0
+        } else {
+            let x = (distance - start) / (self.max_range - start);
+            0.5 * (1.0 + (std::f64::consts::PI * x).cos())
+        }
+    }
+
+    fn curve(&self, distance: f64) -> f64 {
         let (reference, rolloff) = (self.reference, self.rolloff);
         if distance <= reference {
             return 1.0;
@@ -227,9 +251,25 @@ pub struct Acoustics {
     /// Head model: the low-pass cut-off (Hz) for a source straight behind, as the outer ears shade sounds from
     /// behind; none at the side and in front. 0 = none.
     pub rear_shadow: f64,
-    /// The space, for its early reflections.
+    /// The space, for its early reflections and late reverb.
     pub room: crate::rooms::Room,
+    /// The late reverb's level against the room's own (dB); at `REVERB_OFF` or below, none.
+    pub reverb_level: f64,
 }
+
+impl Acoustics {
+    /// The reverb level as a gain (0 = none).
+    pub fn reverb_factor(&self) -> f64 {
+        if self.reverb_level <= REVERB_OFF {
+            0.0
+        } else {
+            10f64.powf(self.reverb_level / 20.0)
+        }
+    }
+}
+
+/// The lowest `reverb-level` (dB), which turns the reverb off.
+pub const REVERB_OFF: f64 = -60.0;
 
 impl Default for Acoustics {
     fn default() -> Self {
@@ -238,6 +278,7 @@ impl Default for Acoustics {
             air_absorption: DEFAULT_AIR_ABSORPTION,
             rear_shadow: DEFAULT_REAR_SHADOW,
             room: crate::rooms::Room::Outdoor,
+            reverb_level: 0.0,
         }
     }
 }
@@ -356,6 +397,19 @@ mod tests {
         assert!((db(p.attenuation(4.0)) + 6.02).abs() < 0.01);
         assert!((db(p.attenuation(5.0)) + 7.96).abs() < 0.01);
         assert!((db(p.attenuation(20.0)) + 20.0).abs() < 0.01);
+        assert!((db(p.attenuation(40.0)) + 26.02).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_last_quarter_of_the_range_fades_out() {
+        let p = DistanceParams::default();
+        // Untouched up to 45 m, half way down at 52.5 m, silent at 60 m.
+        assert!(close(p.attenuation(45.0), 2.0 / 45.0));
+        assert!(close(p.attenuation(52.5), 0.5 * 2.0 / 52.5));
+        assert!(p.attenuation(59.0) < 0.02 * 2.0 / 59.0); // the fade at about −39 dB
+        assert_eq!(p.attenuation(60.0), 0.0);
+        // 1: no fade.
+        let p = DistanceParams { taper: 1.0, ..p };
         assert!((db(p.attenuation(50.0)) + 27.96).abs() < 0.01);
     }
 
@@ -366,6 +420,7 @@ mod tests {
             reference: 10.0,
             rolloff: 2.0,
             max_range: 60.0,
+            taper: DEFAULT_TAPER,
         };
         assert_eq!(p.attenuation(10.0), 1.0);
         assert!(close(p.attenuation(22.5), 0.5));
@@ -380,6 +435,7 @@ mod tests {
             reference: 1.0,
             rolloff: 2.0,
             max_range: 100.0,
+            taper: DEFAULT_TAPER,
         };
         assert!(close(p.attenuation(3.0), 1.0 / 5.0));
     }
@@ -543,6 +599,7 @@ mod tests {
             air_absorption: 0.0,
             rear_shadow: 0.0,
             room: crate::rooms::Room::Outdoor,
+            reverb_level: 0.0,
         };
         // Straight ahead: both ears the same, no delay, no filter.
         let [l, r] = ears(&Rendering::CENTRE, &head);
@@ -569,6 +626,7 @@ mod tests {
             air_absorption: 0.0,
             rear_shadow: 0.0,
             room: crate::rooms::Room::Outdoor,
+            reverb_level: 0.0,
         };
         let [l, r] = ears(
             &Rendering {
@@ -590,6 +648,7 @@ mod tests {
             air_absorption: 0.0,
             rear_shadow: 4000.0,
             room: crate::rooms::Room::Outdoor,
+            reverb_level: 0.0,
         };
         let from = |behind: f64| {
             ears(

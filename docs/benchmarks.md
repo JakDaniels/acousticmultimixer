@@ -11,6 +11,19 @@ side includes the Opus encoders or WebRTC, which cost the same either way.
 - **Quiet:** a sine at −80 dB, as decoded comfort noise: real audio to mix. **Silent (GAP):** buffers flagged GAP,
   which aggregators skip.
 
+## 2026-11-19: step 5 (late reverb)
+
+Same machine and settings, as fast as possible, 32 participants, 30 s, acousticmultimixer only:
+
+| case | `small-room`, `reverb-level=-60` (step 4) | `small-room` | `cave` |
+|---|---|---|---|
+| 32 talking | 54.1 % | 63.6 % | 63.4 % |
+| 3 talking, 29 quiet | 55.4 % | 64.5 % | 59.2 % |
+| 3 talking, 29 silent (GAP) | 22.2 % | 23.1 % | 23.5 % |
+
+A delay network per voice costs about +9 % of a core at 32 voices, whatever the room's size (the cave's quiet
+figure had noisy sources: 12 % alone against 5–6 % in the other runs).
+
 ## 2026-11-18: step 4 (early reflections)
 
 Same machine and settings (defaults: `head`, air 0.1), as fast as possible, 32 participants, 30 s, acousticmultimixer

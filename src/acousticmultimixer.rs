@@ -33,14 +33,16 @@
  * listener's own gains for others (e.g. trims,sink_0=0.0,sink_2=0.5). A participant with no
  * position (none of x … roll ever set) is heard centred at full volume, and hears everyone
  * that way. Level falls with distance by the element's "distance-model",
- * "reference-distance", "rolloff" and "max-range", and distant voices lose high frequencies
+ * "reference-distance", "rolloff" and "max-range" (fading out smoothly from "taper" × max-range,
+ * by default the last quarter, so voices do not cut off), and distant voices lose high frequencies
  * ("air-absorption"). Direction ("direction-model"): "head" (default) gives the far ear the
  * voice later (up to 0.66 ms), quieter and duller, as a head between the ears would, and
  * voices behind duller in both ears ("rear-shadow"), as the outer ears make them; "pan" is a
  * constant-power stereo pan (silent in the far ear at the side; with air-absorption=0, the same
  * as SpatialAudioServer's matrix engine). "room" adds the early reflections of a kind of space
  * ("outdoor", the default, has none): a few echoes after each voice, the later ones heard more
- * from all around, and relatively louder the further away the voice is.
+ * from all around, then a decaying tail (late reverb, its level adjusted by "reverb-level"),
+ * relatively louder the further away the voice is.
  * Changes are taken once per output buffer and ramp across it, so moving does not click.
  *
  * The sample rate is not negotiated, as this is not possible to do in a race-free manner. It
@@ -267,6 +269,15 @@ impl ObjectImpl for AcousticMultiMixer {
                     .mutable_playing()
                     .build(),
 
+                glib::ParamSpecDouble::builder("taper")
+                    .nick("Taper")
+                    .blurb("Where voices start fading out, as a fraction of max-range; silent at max-range (1 = no fade)")
+                    .minimum(0.0)
+                    .maximum(1.0)
+                    .default_value(DistanceParams::default().taper)
+                    .mutable_playing()
+                    .build(),
+
                 glib::ParamSpecEnum::builder_with_default("direction-model", Acoustics::default().direction)
                     .nick("Direction model")
                     .blurb("How direction is heard: a stereo pan, or a head (the far ear later, quieter, duller)")
@@ -284,7 +295,16 @@ impl ObjectImpl for AcousticMultiMixer {
 
                 glib::ParamSpecEnum::builder_with_default("room", Acoustics::default().room)
                     .nick("Room")
-                    .blurb("The space every voice is in, for its early reflections: outdoor (none), small-room, hall, cave")
+                    .blurb("The space every voice is in, for its early reflections and late reverb: outdoor (none), small-room, hall, cave")
+                    .mutable_playing()
+                    .build(),
+
+                glib::ParamSpecDouble::builder("reverb-level")
+                    .nick("Reverb level")
+                    .blurb("The room's late reverb against its usual level (dB); -60 = none")
+                    .minimum(crate::spatial::REVERB_OFF)
+                    .maximum(12.0)
+                    .default_value(Acoustics::default().reverb_level)
                     .mutable_playing()
                     .build(),
 
@@ -402,7 +422,7 @@ impl ObjectImpl for AcousticMultiMixer {
                 settings.max_participants = value.get::<u32>().unwrap();
             }
 
-            "direction-model" | "air-absorption" | "rear-shadow" | "room" => {
+            "direction-model" | "air-absorption" | "rear-shadow" | "room" | "reverb-level" => {
                 let state_guard = self.state.lock().unwrap();
                 let state = state_guard.as_ref().expect("state");
                 let mut scene = state.scene.lock().unwrap();
@@ -412,12 +432,13 @@ impl ObjectImpl for AcousticMultiMixer {
                     }
                     "room" => scene.acoustics.room = value.get::<crate::rooms::Room>().unwrap(),
                     "air-absorption" => scene.acoustics.air_absorption = value.get().unwrap(),
+                    "reverb-level" => scene.acoustics.reverb_level = value.get().unwrap(),
                     _ => scene.acoustics.rear_shadow = value.get().unwrap(),
                 }
                 scene.dirty = true;
             }
 
-            "distance-model" | "reference-distance" | "rolloff" | "max-range" => {
+            "distance-model" | "reference-distance" | "rolloff" | "max-range" | "taper" => {
                 let state_guard = self.state.lock().unwrap();
                 let state = state_guard.as_ref().expect("state");
                 let mut scene = state.scene.lock().unwrap();
@@ -426,6 +447,7 @@ impl ObjectImpl for AcousticMultiMixer {
                     "distance-model" => params.model = value.get::<DistanceModel>().unwrap(),
                     "reference-distance" => params.reference = value.get().unwrap(),
                     "rolloff" => params.rolloff = value.get().unwrap(),
+                    "taper" => params.taper = value.get().unwrap(),
                     _ => params.max_range = value.get().unwrap(),
                 }
                 scene.dirty = true;
@@ -467,7 +489,7 @@ impl ObjectImpl for AcousticMultiMixer {
                 settings.max_participants.to_value()
             }
 
-            "direction-model" | "air-absorption" | "rear-shadow" | "room" => {
+            "direction-model" | "air-absorption" | "rear-shadow" | "room" | "reverb-level" => {
                 let state_guard = self.state.lock().unwrap();
                 let state = state_guard.as_ref().expect("state");
                 let acoustics = state.scene.lock().unwrap().acoustics;
@@ -475,11 +497,12 @@ impl ObjectImpl for AcousticMultiMixer {
                     "direction-model" => acoustics.direction.to_value(),
                     "room" => acoustics.room.to_value(),
                     "air-absorption" => acoustics.air_absorption.to_value(),
+                    "reverb-level" => acoustics.reverb_level.to_value(),
                     _ => acoustics.rear_shadow.to_value(),
                 }
             }
 
-            "distance-model" | "reference-distance" | "rolloff" | "max-range" => {
+            "distance-model" | "reference-distance" | "rolloff" | "max-range" | "taper" => {
                 let state_guard = self.state.lock().unwrap();
                 let state = state_guard.as_ref().expect("state");
                 let params = state.scene.lock().unwrap().params;
@@ -487,6 +510,7 @@ impl ObjectImpl for AcousticMultiMixer {
                     "distance-model" => params.model.to_value(),
                     "reference-distance" => params.reference.to_value(),
                     "rolloff" => params.rolloff.to_value(),
+                    "taper" => params.taper.to_value(),
                     _ => params.max_range.to_value(),
                 }
             }

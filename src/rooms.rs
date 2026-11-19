@@ -1,8 +1,10 @@
 // Copyright 2026 Simon Annetts/Jak Daniels
 // SPDX-License-Identifier: MPL-2.0
 
-//! Room presets: the early reflections every voice gets in a kind of space. Each is a few taps (a delay after the
-//! direct sound and a level), and a treble cut for what the walls absorb. Data only, so a new room needs no code.
+//! Room presets: the early reflections every voice gets in a kind of space, and its late reverb. The reflections
+//! are a few taps (a delay after the direct sound and a level) and a treble cut for what the walls absorb; the
+//! reverb is a decay time (in the bass and in the treble), a level and a size. Data only, so a new room needs no
+//! code.
 
 use gst::glib;
 
@@ -22,6 +24,22 @@ pub struct Preset {
     pub taps: &'static [Tap],
     /// One-pole low-pass on the reflections (Hz): the walls' treble absorption.
     pub cutoff_hz: f64,
+    /// The decaying tail after them; none outdoors.
+    pub reverb: Option<Reverb>,
+}
+
+/// A room's late reverb: a feedback delay network per voice (see `dsp`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Reverb {
+    /// Time to fall by 60 dB (s): in the bass, and in the treble (at the top of the band; shorter, as walls and
+    /// air absorb more of it).
+    pub decay_s: f64,
+    pub treble_decay_s: f64,
+    /// The tail's energy against the direct sound of a voice at the reference distance (dB, each ear).
+    pub level_db: f64,
+    /// The delay lines' mean length (ms): about how long sound takes between walls, so it also sets when the tail
+    /// starts.
+    pub size_ms: f64,
 }
 
 const fn tap(delay_ms: f64, gain_db: f64) -> Tap {
@@ -41,10 +59,10 @@ const HALL: &[Tap] = &[
     tap(70.0, -19.0),
 ];
 const CAVE: &[Tap] = &[
-    tap(80.0, -8.0),
-    tap(140.0, -12.0),
-    tap(220.0, -15.0),
-    tap(430.0, -20.0),
+    tap(25.0, -8.0),
+    tap(45.0, -12.0),
+    tap(70.0, -15.0),
+    tap(110.0, -20.0),
 ];
 
 /// The room a scene is in.
@@ -63,7 +81,7 @@ pub enum Room {
     #[enum_value(name = "Hall: later, more spread-out reflections", nick = "hall")]
     Hall,
 
-    #[enum_value(name = "Cave: long, strong echoes", nick = "cave")]
+    #[enum_value(name = "Cave: a large rocky chamber, dark and long", nick = "cave")]
     Cave,
 }
 
@@ -73,18 +91,37 @@ impl Room {
             Room::Outdoor => Preset {
                 taps: &[],
                 cutoff_hz: f64::INFINITY,
+                reverb: None,
             },
             Room::Small => Preset {
                 taps: SMALL_ROOM,
                 cutoff_hz: 6000.0,
+                reverb: Some(Reverb {
+                    decay_s: 0.4,
+                    treble_decay_s: 0.15,
+                    level_db: -15.0,
+                    size_ms: 12.0,
+                }),
             },
             Room::Hall => Preset {
                 taps: HALL,
                 cutoff_hz: 5000.0,
+                reverb: Some(Reverb {
+                    decay_s: 1.1,
+                    treble_decay_s: 0.35,
+                    level_db: -15.0,
+                    size_ms: 45.0,
+                }),
             },
             Room::Cave => Preset {
                 taps: CAVE,
                 cutoff_hz: 3000.0,
+                reverb: Some(Reverb {
+                    decay_s: 1.8,
+                    treble_decay_s: 0.5,
+                    level_db: -13.0,
+                    size_ms: 70.0,
+                }),
             },
         }
     }

@@ -3,13 +3,13 @@
 A GStreamer multi mixer with acoustic space modelling, written in Rust.
 
 Every input is one person's voice; every output is what one person hears: everyone else (mix-minus), placed in a
-shared virtual space by distance and direction, with early reflections and a shared reverb from a room preset. It is
+shared virtual space by distance and direction, with early reflections and a late reverb from a room preset. It is
 being built for [SpatialAudioServer](https://github.com/JakDaniels/SpatialAudioServer), an audio conferencing server
 (MCU) with spatial audio, and is meant to be useful to any GStreamer application.
 
 **Status:** under development. Working now: mix-minus in stereo, with level by distance (SpatialAudioServer's
 formulas), direction by a simple head model (the far ear hears later, quieter and duller) or a stereo pan, air
-absorption, and per-person gain, mute and trims. Next: early reflections and reverb.
+absorption, per-person gain, mute and trims, and rooms (`room`) with early reflections and late reverb.
 The plan and the decisions: [PLAN.md](PLAN.md); the original design: [docs/design.md](docs/design.md); what
 changed: [CHANGELOG.md](CHANGELOG.md).
 
