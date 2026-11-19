@@ -14,6 +14,20 @@ use crate::spatial::{Acoustics, DistanceParams, Orientation, ears, render};
 /// first) left distant voices too loud right up to the edge of the range.
 const ROOM_FALLOFF: f64 = 0.75;
 
+/// Close up the direct sound stays at full volume (within the reference distance, so nearby voices are not too
+/// loud), so instead the room is turned down closer than the near distance: 6 dB per halving of the distance, down
+/// to this distance (m), as a voice right next to you stands out from the room.
+const NEAR_FLOOR: f64 = 0.5;
+
+/// The room's share of a voice closer than `near` (1 at and beyond it; `near` 0 = always 1).
+fn nearness(distance: f64, near: f64) -> f64 {
+    if distance < near {
+        distance.max(NEAR_FLOOR).min(near) / near
+    } else {
+        1.0
+    }
+}
+
 /// Largest gain (and per-listener trim) accepted: +20 dB.
 pub const MAX_GAIN: f64 = 10.0;
 
@@ -151,10 +165,17 @@ impl Scene {
                 if trim <= 0.0 {
                     continue;
                 }
+                let positioned = speaker.speaker().is_some() && listener.listener().is_some();
                 let mut r = render(speaker.speaker(), listener.listener(), &self.params);
                 // Reflections and reverb fall off with distance at three quarters of the direct sound's rate (in
-                // dB), so the further away a voice is, the more of it is the room, yet it still fades.
-                let reflected = r.gain.powf(ROOM_FALLOFF) * speaker.gain * trim;
+                // dB), so the further away a voice is, the more of it is the room, yet it still fades; close up,
+                // the room gives way to the voice.
+                let near = if positioned {
+                    nearness(r.distance, self.acoustics.near_distance)
+                } else {
+                    1.0
+                };
+                let reflected = r.gain.powf(ROOM_FALLOFF) * near * speaker.gain * trim;
                 r.gain *= speaker.gain * trim;
                 for (ear, e) in ears(&r, &self.acoustics).into_iter().enumerate() {
                     let i = s * width + 2 * l + ear;
@@ -329,5 +350,23 @@ mod tests {
         scene.compute(&mut paths);
         assert!((paths.reflect[i] - room).abs() < 1e-6 && paths.reflect[i + 1].abs() < 1e-6);
         assert!((paths.diffuse[i + 1] - room).abs() < 1e-6);
+
+        // Inside the near distance (2 m) the voice stays at full volume and the room is turned down: half at 1 m, a
+        // quarter at 0.5 m and closer.
+        for (x, share) in [(2.0, 1.0), (1.0, 0.5), (0.5, 0.25), (0.0, 0.25)] {
+            scene.participants[1].position = [x, 0.0, 0.0];
+            scene.compute(&mut paths);
+            assert!((paths.gain[i] - 1.0).abs() < 1e-6, "{x}");
+            assert!((paths.diffuse[i] - share).abs() < 1e-6, "{x}");
+        }
+        // From 4 m: half at 2 m; 0: never.
+        scene.participants[1].position = [2.0, 0.0, 0.0];
+        scene.acoustics.near_distance = 4.0;
+        scene.compute(&mut paths);
+        assert!((paths.diffuse[i] - 0.5).abs() < 1e-6);
+        scene.participants[1].position = [0.5, 0.0, 0.0];
+        scene.acoustics.near_distance = 0.0;
+        scene.compute(&mut paths);
+        assert!((paths.diffuse[i] - 1.0).abs() < 1e-6);
     }
 }

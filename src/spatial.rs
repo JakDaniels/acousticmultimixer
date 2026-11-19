@@ -255,6 +255,8 @@ pub struct Acoustics {
     pub room: crate::rooms::Room,
     /// The late reverb's level against the room's own (dB); at `REVERB_OFF` or below, none.
     pub reverb_level: f64,
+    /// Closer than this (m) a voice's room sound is turned down, so it stands out from the room; 0 = never.
+    pub near_distance: f64,
 }
 
 impl Acoustics {
@@ -268,6 +270,8 @@ impl Acoustics {
     }
 }
 
+pub const DEFAULT_NEAR_DISTANCE: f64 = 2.0;
+
 /// The lowest `reverb-level` (dB), which turns the reverb off.
 pub const REVERB_OFF: f64 = -60.0;
 
@@ -279,6 +283,7 @@ impl Default for Acoustics {
             rear_shadow: DEFAULT_REAR_SHADOW,
             room: crate::rooms::Room::Outdoor,
             reverb_level: 0.0,
+            near_distance: DEFAULT_NEAR_DISTANCE,
         }
     }
 }
@@ -600,6 +605,7 @@ mod tests {
             rear_shadow: 0.0,
             room: crate::rooms::Room::Outdoor,
             reverb_level: 0.0,
+            near_distance: DEFAULT_NEAR_DISTANCE,
         };
         // Straight ahead: both ears the same, no delay, no filter.
         let [l, r] = ears(&Rendering::CENTRE, &head);
@@ -627,6 +633,7 @@ mod tests {
             rear_shadow: 0.0,
             room: crate::rooms::Room::Outdoor,
             reverb_level: 0.0,
+            near_distance: DEFAULT_NEAR_DISTANCE,
         };
         let [l, r] = ears(
             &Rendering {
@@ -649,6 +656,7 @@ mod tests {
             rear_shadow: 4000.0,
             room: crate::rooms::Room::Outdoor,
             reverb_level: 0.0,
+            near_distance: DEFAULT_NEAR_DISTANCE,
         };
         let from = |behind: f64| {
             ears(

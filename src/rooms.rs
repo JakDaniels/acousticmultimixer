@@ -46,11 +46,23 @@ const fn tap(delay_ms: f64, gain_db: f64) -> Tap {
     Tap { delay_ms, gain_db }
 }
 
+const TINY_ROOM: &[Tap] = &[
+    tap(1.5, -8.0),
+    tap(3.5, -11.0),
+    tap(5.5, -14.0),
+    tap(8.0, -18.0),
+];
 const SMALL_ROOM: &[Tap] = &[
     tap(3.0, -9.0),
     tap(7.0, -12.0),
     tap(11.0, -15.0),
     tap(17.0, -19.0),
+];
+const BIG_ROOM: &[Tap] = &[
+    tap(8.0, -9.0),
+    tap(15.0, -12.0),
+    tap(24.0, -15.0),
+    tap(36.0, -19.0),
 ];
 const HALL: &[Tap] = &[
     tap(15.0, -10.0),
@@ -58,11 +70,24 @@ const HALL: &[Tap] = &[
     tap(40.0, -15.0),
     tap(70.0, -19.0),
 ];
+/// Close side walls first, then the far ends.
+const LONG_HALL: &[Tap] = &[
+    tap(5.0, -9.0),
+    tap(12.0, -12.0),
+    tap(45.0, -16.0),
+    tap(85.0, -20.0),
+];
 const CAVE: &[Tap] = &[
     tap(25.0, -8.0),
     tap(45.0, -12.0),
     tap(70.0, -15.0),
     tap(110.0, -20.0),
+];
+const CATHEDRAL: &[Tap] = &[
+    tap(20.0, -10.0),
+    tap(38.0, -13.0),
+    tap(60.0, -16.0),
+    tap(90.0, -20.0),
 ];
 
 /// The room a scene is in.
@@ -75,14 +100,35 @@ pub enum Room {
     #[enum_value(name = "Outdoor: no reflections", nick = "outdoor")]
     Outdoor,
 
+    #[enum_value(
+        name = "Tiny room: a closet or bathroom, very close walls",
+        nick = "tiny-room"
+    )]
+    Tiny,
+
     #[enum_value(name = "Small room: short, close reflections", nick = "small-room")]
     Small,
+
+    #[enum_value(name = "Big room: a classroom or large office", nick = "big-room")]
+    Big,
 
     #[enum_value(name = "Hall: later, more spread-out reflections", nick = "hall")]
     Hall,
 
+    #[enum_value(
+        name = "Long hall: a gallery or corridor, near sides and far ends",
+        nick = "long-hall"
+    )]
+    LongHall,
+
     #[enum_value(name = "Cave: a large rocky chamber, dark and long", nick = "cave")]
     Cave,
+
+    #[enum_value(
+        name = "Cathedral: vast stone and glass, a long bright tail",
+        nick = "cathedral"
+    )]
+    Cathedral,
 }
 
 impl Room {
@@ -93,6 +139,16 @@ impl Room {
                 cutoff_hz: f64::INFINITY,
                 reverb: None,
             },
+            Room::Tiny => Preset {
+                taps: TINY_ROOM,
+                cutoff_hz: 7000.0,
+                reverb: Some(Reverb {
+                    decay_s: 0.3,
+                    treble_decay_s: 0.12,
+                    level_db: -16.0,
+                    size_ms: 6.0,
+                }),
+            },
             Room::Small => Preset {
                 taps: SMALL_ROOM,
                 cutoff_hz: 6000.0,
@@ -101,6 +157,16 @@ impl Room {
                     treble_decay_s: 0.15,
                     level_db: -15.0,
                     size_ms: 12.0,
+                }),
+            },
+            Room::Big => Preset {
+                taps: BIG_ROOM,
+                cutoff_hz: 5500.0,
+                reverb: Some(Reverb {
+                    decay_s: 0.7,
+                    treble_decay_s: 0.25,
+                    level_db: -15.0,
+                    size_ms: 25.0,
                 }),
             },
             Room::Hall => Preset {
@@ -113,6 +179,16 @@ impl Room {
                     size_ms: 45.0,
                 }),
             },
+            Room::LongHall => Preset {
+                taps: LONG_HALL,
+                cutoff_hz: 5000.0,
+                reverb: Some(Reverb {
+                    decay_s: 1.4,
+                    treble_decay_s: 0.4,
+                    level_db: -15.0,
+                    size_ms: 40.0,
+                }),
+            },
             Room::Cave => Preset {
                 taps: CAVE,
                 cutoff_hz: 3000.0,
@@ -121,6 +197,16 @@ impl Room {
                     treble_decay_s: 0.5,
                     level_db: -13.0,
                     size_ms: 70.0,
+                }),
+            },
+            Room::Cathedral => Preset {
+                taps: CATHEDRAL,
+                cutoff_hz: 4000.0,
+                reverb: Some(Reverb {
+                    decay_s: 3.0,
+                    treble_decay_s: 1.2,
+                    level_db: -12.0,
+                    size_ms: 90.0,
                 }),
             },
         }

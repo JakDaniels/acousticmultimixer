@@ -14,11 +14,13 @@ What changed in each release.
   quieter and duller; `direction-model=pan` keeps the stereo pan. Distant voices lose high frequencies
   (`air-absorption`), and voices behind the listener are duller in both ears (`rear-shadow`), so front and back
   sound different.
-- Rooms (`room`: `outdoor`, the default, `small-room`, `hall`, `cave`): each voice gets the early reflections of
-  that kind of space, the later ones heard more from all around and relatively louder the further away it is.
+- Rooms (`room`: `outdoor`, the default, `tiny-room`, `small-room`, `big-room`, `hall`, `long-hall`, `cave`,
+  `cathedral`): each voice gets the early reflections of that kind of space, the later ones heard more from all
+  around and relatively louder the further away it is.
 - Late reverb in every room but `outdoor`: each voice gets a decaying tail (its own delay network, so nobody hears
   their own), falling with distance like the reflections; `reverb-level` turns it up, down or off. Reflections
-  now fall with distance faster than before (three quarters of the direct sound's rate in dB, not half).
+  now fall with distance faster than before (three quarters of the direct sound's rate in dB, not half), and
+  closer than `near-distance` (2 m) the room sound is turned down, so a voice right next to you stands out.
 - Voices fade out smoothly over the last quarter of the range (`taper`, 0.75) instead of cutting off at
   `max-range`.
 - Fixed: mixing slowed down many times over (stuttering) once voices fell to exact silence after speaking, as the

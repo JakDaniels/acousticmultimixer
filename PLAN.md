@@ -148,8 +148,9 @@ gst-launch-1.0 acousticmultimixer name=m sink_1::y=4 sink_2::x=8 \
   `direction-model` (`head`, the default: the far ear later, quieter and duller; `pan`: a constant-power stereo
   pan), `air-absorption` (dB per metre at 8 kHz, default 0.1; `pan` with 0 is SpatialAudioServer's `matrix`
   exactly), `rear-shadow` (`head` only: the low-pass cut-off for a voice straight behind, default 4000 Hz) and
-  `room` (early reflections: `outdoor`, the default, none; `small-room`, `hall`, `cave`); the aggregator properties
-  `minus1mixer` already proxies (`latency`, `force-live`, …). Later: reverb settings (#1).
+  `room` (early reflections and reverb: `outdoor`, the default, none; `tiny-room`, `small-room`, `big-room`, `hall`,
+  `long-hall`, `cave`, `cathedral`); the aggregator properties
+  `minus1mixer` already proxies (`latency`, `force-live`, …); `reverb-level` (#1) and `taper`.
 - Property changes only mark the scene as changed. The gains are recomputed at most once per output buffer, and a
   changed path ramps linearly from the old value to the new one across that buffer (10 ms by default). A new
   participant, or an output just linked, starts at its values: there is nothing to click from.
@@ -356,6 +357,18 @@ bots).
 - The cave's taps were step 4's 80/140/220/430 ms: walls 14–74 m away, gaps of 60–210 ms heard as separate
   echoes. Now 25/45/70/110 ms (walls about 4–19 m away, a chamber 25–35 m across; gaps under 50 ms blend), with a
   70 ms network size to match; the long dark tail is what sets it apart from the hall.
+- Three more presets (2026-11-19), to be tuned by ear: tiny-room (a closet or bathroom: taps 1.5/3.5/5.5/8 ms,
+  7 kHz; tail 0.3 s / 0.12 s / −16 dB / 6 ms), big-room (a classroom or large office: 8/15/24/36 ms, 5.5 kHz;
+  0.7 s / 0.25 s / −15 dB / 25 ms) and long-hall (a gallery or corridor: near side walls at 5/12 ms, far ends at
+  45/85 ms, 5 kHz; 1.4 s / 0.4 s / −15 dB / 40 ms). Then cathedral (vast stone and glass: 20/38/60/90 ms, 4 kHz;
+  3 s / 1.2 s / −12 dB / 90 ms: the longest and brightest tail, shortened from a real one's 5–8 s for speech).
+- Close up (2026-11-19): inside the reference distance the direct sound stays at full volume, so the voice-to-room
+  balance did not change there at all. Now the room sound (reflections and reverb) is turned down instead: 6 dB
+  per halving of the distance, to −12 dB at 0.5 m (`NEAR_FLOOR`), so someone right next to you stands out from
+  the room. From `near-distance` (2 m), its own setting: the reference distance also sets the direct sound's
+  curve, and the `meeting` profile's 10 m would turn the room far down. Overall loudness is still capped. Not yet tried, if moving away should shift the balance more: a
+  `ROOM_FALLOFF` of 0.6 (the room +7 dB against the voice at 16 m instead of +4.5 dB; far voices a little
+  louder).
 - Reflections and reverb now fall at three quarters of the direct sound's rate in dB (`ROOM_FALLOFF`), not half:
   at half, a voice 58 m away was still at −15 dB of room sound (direct −29 dB) until the 60 m cut-off.
 - Denormals: the one-pole filters (per-ear, from step 3, and the walls', from step 4) fed exact silence after

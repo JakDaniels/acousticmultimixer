@@ -200,7 +200,15 @@ mod tests {
 
     #[test]
     fn line_lengths_are_distinct_primes() {
-        for room in [Room::Small, Room::Hall, Room::Cave] {
+        for room in [
+            Room::Tiny,
+            Room::Small,
+            Room::Big,
+            Room::Hall,
+            Room::LongHall,
+            Room::Cave,
+            Room::Cathedral,
+        ] {
             let net = Network::new(&room.preset().reverb.unwrap(), RATE);
             for (i, &d) in net.len.iter().enumerate() {
                 assert_eq!(next_prime(d), d);

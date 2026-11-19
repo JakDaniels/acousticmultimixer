@@ -42,7 +42,7 @@
  * as SpatialAudioServer's matrix engine). "room" adds the early reflections of a kind of space
  * ("outdoor", the default, has none): a few echoes after each voice, the later ones heard more
  * from all around, then a decaying tail (late reverb, its level adjusted by "reverb-level"),
- * relatively louder the further away the voice is.
+ * relatively louder the further away the voice is, and quieter closer than "near-distance".
  * Changes are taken once per output buffer and ramp across it, so moving does not click.
  *
  * The sample rate is not negotiated, as this is not possible to do in a race-free manner. It
@@ -295,7 +295,16 @@ impl ObjectImpl for AcousticMultiMixer {
 
                 glib::ParamSpecEnum::builder_with_default("room", Acoustics::default().room)
                     .nick("Room")
-                    .blurb("The space every voice is in, for its early reflections and late reverb: outdoor (none), small-room, hall, cave")
+                    .blurb("The space every voice is in, for its early reflections and late reverb: outdoor (none), tiny-room, small-room, big-room, hall, long-hall, cave, cathedral")
+                    .mutable_playing()
+                    .build(),
+
+                glib::ParamSpecDouble::builder("near-distance")
+                    .nick("Near distance")
+                    .blurb("Closer than this (m) a voice's reflections and reverb are turned down, 6 dB per halving to 0.5 m, so it stands out from the room (0 = never)")
+                    .minimum(0.0)
+                    .maximum(1e3)
+                    .default_value(Acoustics::default().near_distance)
                     .mutable_playing()
                     .build(),
 
@@ -422,7 +431,8 @@ impl ObjectImpl for AcousticMultiMixer {
                 settings.max_participants = value.get::<u32>().unwrap();
             }
 
-            "direction-model" | "air-absorption" | "rear-shadow" | "room" | "reverb-level" => {
+            "direction-model" | "air-absorption" | "rear-shadow" | "room" | "reverb-level"
+            | "near-distance" => {
                 let state_guard = self.state.lock().unwrap();
                 let state = state_guard.as_ref().expect("state");
                 let mut scene = state.scene.lock().unwrap();
@@ -433,6 +443,7 @@ impl ObjectImpl for AcousticMultiMixer {
                     "room" => scene.acoustics.room = value.get::<crate::rooms::Room>().unwrap(),
                     "air-absorption" => scene.acoustics.air_absorption = value.get().unwrap(),
                     "reverb-level" => scene.acoustics.reverb_level = value.get().unwrap(),
+                    "near-distance" => scene.acoustics.near_distance = value.get().unwrap(),
                     _ => scene.acoustics.rear_shadow = value.get().unwrap(),
                 }
                 scene.dirty = true;
@@ -489,7 +500,8 @@ impl ObjectImpl for AcousticMultiMixer {
                 settings.max_participants.to_value()
             }
 
-            "direction-model" | "air-absorption" | "rear-shadow" | "room" | "reverb-level" => {
+            "direction-model" | "air-absorption" | "rear-shadow" | "room" | "reverb-level"
+            | "near-distance" => {
                 let state_guard = self.state.lock().unwrap();
                 let state = state_guard.as_ref().expect("state");
                 let acoustics = state.scene.lock().unwrap().acoustics;
@@ -498,6 +510,7 @@ impl ObjectImpl for AcousticMultiMixer {
                     "room" => acoustics.room.to_value(),
                     "air-absorption" => acoustics.air_absorption.to_value(),
                     "reverb-level" => acoustics.reverb_level.to_value(),
+                    "near-distance" => acoustics.near_distance.to_value(),
                     _ => acoustics.rear_shadow.to_value(),
                 }
             }
