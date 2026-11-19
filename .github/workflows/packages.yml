@@ -1,0 +1,295 @@
+# Copyright 2026 Simon Annetts/Jak Daniels
+# SPDX-License-Identifier: MPL-2.0
+
+# Builds the packages, tries them, then puts them in a GitHub release (PLAN.md step 6). Called by drafts.yml (the
+# rolling pre-release "develop (draft)") and release.yml (a draft release for a version tag), so both build the same
+# way. As SpatialAudioServer's packages.yml, but the jobs hand files on as workflow artefacts, and the release is
+# made only once everything has passed.
+#   linux    .deb and .rpm, x64 and arm64 (each on its own runner), built on Ubuntu 24.04 (GStreamer 1.24)
+#   test     each package installed and tried on its distributions, both architectures
+#   windows  the DLL (MSVC x64) built against the GStreamer SpatialAudioServer's MSIs carry, loaded and tried
+#   release  the release with every file and SHA256SUMS
+name: packages
+
+on:
+  workflow_call:
+    inputs:
+      kind:
+        description: "develop-draft: replace the rolling pre-release; release: a draft release for the version tag"
+        type: string
+        required: true
+      tag:
+        description: The release's tag (develop-draft, or the version tag such as v0.1.0)
+        type: string
+        required: true
+      version:
+        description: When set, the version the build must have (from the tag)
+        type: string
+        default: ''
+      ref:
+        description: What to build (default the commit that started the run; release.yml passes the tag)
+        type: string
+        default: ''
+      intro:
+        description: The release notes' first part; {version} and {sha} are filled in
+        type: string
+        required: true
+
+env:
+  NFPM_VERSION: 2.48.0
+  # The Windows DLL is built against the GStreamer that SpatialAudioServer's MSIs carry (its packages.yml).
+  GSTREAMER_VERSION: 1.28.8
+  GSTREAMER_SHA256: e4c41ee6ee9c6c32a45d198463ec08d79bac3bd5fa58adc93d13fe4a08abc9d9
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: linux (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    container: ubuntu:24.04
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - { arch: x64, runner: ubuntu-24.04, nfpm: x86_64, nfpm_sha256: 6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750 }
+          - { arch: arm64, runner: ubuntu-24.04-arm, nfpm: arm64, nfpm_sha256: a9a75213763783b7669719e505474c748c5ad7dc66591a195619deb50f85c2f4 }
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+    steps:
+      - name: GStreamer and build tools
+        run: |
+          apt-get update -q
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+      # Full history and the tags: the version comes from them (scripts/version.sh).
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+
+      - name: Tags
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git fetch --force --tags origin
+
+      - name: Rust and nfpm
+        env:
+          NFPM_ARCH: ${{ matrix.nfpm }}
+          NFPM_SHA256: ${{ matrix.nfpm_sha256 }}
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          archive="nfpm_${NFPM_VERSION}_Linux_${NFPM_ARCH}.tar.gz"
+          curl -fsSLO "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/${archive}"
+          echo "${NFPM_SHA256}  ${archive}" | sha256sum -c -
+          tar -xzf "${archive}" -C /usr/local/bin nfpm
+
+      - name: Build the packages
+        id: build
+        env:
+          EXPECTED: ${{ inputs.version }}
+        run: |
+          scripts/build-packages.sh
+          version="$(scripts/version.sh)"
+          if [ -n "$EXPECTED" ] && [ "$version" != "$EXPECTED" ]; then
+            echo "::error::Built version $version, but the tag says $EXPECTED"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-${{ matrix.arch }}
+          path: |
+            dist/*.deb
+            dist/*.rpm
+          if-no-files-found: error
+
+  # Each distribution in a clean container, on each architecture.
+  test:
+    needs: linux
+    name: test (${{ matrix.image }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    container: ${{ matrix.image }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+        image: ['ubuntu:24.04', 'ubuntu:26.04', 'debian:13', 'fedora:latest']
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-${{ matrix.arch }}
+          path: packages
+
+      - name: Install and try
+        run: sh scripts/test-packages.sh packages
+
+  # The DLL for SpatialAudioServer's MSIs (and anyone with GStreamer 1.28 for Windows): built against the pinned
+  # GStreamer (installed with its development files into a scratch folder), then loaded and tried with it.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+
+      - name: Tags
+        run: git fetch --force --tags origin
+
+      - name: Cache the GStreamer installer
+        uses: actions/cache@v6
+        with:
+          path: gstreamer-installer
+          key: gstreamer-msvc-x86_64-${{ env.GSTREAMER_VERSION }}
+
+      - name: GStreamer with its development files (pinned)
+        run: |
+          $exe = "gstreamer-installer\gstreamer-1.0-msvc-x86_64-$env:GSTREAMER_VERSION.exe"
+          if (-not (Test-Path $exe)) {
+            New-Item -ItemType Directory -Force gstreamer-installer | Out-Null
+            Invoke-WebRequest -Uri "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GSTREAMER_VERSION/msvc/gstreamer-1.0-msvc-x86_64-$env:GSTREAMER_VERSION.exe" -OutFile $exe
+          }
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:GSTREAMER_SHA256) { throw "GStreamer installer checksum $hash, expected $env:GSTREAMER_SHA256" }
+          # Inno Setup, silent, into a scratch folder; the "devel" type is the runtime and the development files.
+          $p = Start-Process -FilePath $exe -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/TYPE=devel', "/DIR=$env:RUNNER_TEMP\gst" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "GStreamer installer failed ($($p.ExitCode))" }
+          # The folder holding bin\ and lib\ (the installer may add a level).
+          $pc = Get-ChildItem -Recurse "$env:RUNNER_TEMP\gst" -Filter gstreamer-1.0.pc | Select-Object -First 1
+          if (-not $pc) { throw "No gstreamer-1.0.pc: the development files were not installed" }
+          $root = $pc.Directory.Parent.Parent.FullName
+          Write-Host "GStreamer at $root"
+          "GST_ROOT=$root" >> $env:GITHUB_ENV
+          "PKG_CONFIG_PATH=$root\lib\pkgconfig" >> $env:GITHUB_ENV
+          "$root\bin" >> $env:GITHUB_PATH
+          Get-ChildItem "$root\bin" -Filter pkg-config*.exe | Select-Object Name
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - name: Build the DLL
+        id: build
+        shell: bash
+        env:
+          EXPECTED: ${{ inputs.version }}
+        run: |
+          # pkg-config: GStreamer's own if it ships one, else the runner's.
+          command -v pkg-config || { echo "::error::No pkg-config"; exit 1; }
+          scripts/with-version.sh cargo build --release
+          version="$(scripts/version.sh)"
+          if [ -n "$EXPECTED" ] && [ "$version" != "$EXPECTED" ]; then
+            echo "::error::Built version $version, but the tag says $EXPECTED"
+            exit 1
+          fi
+          mkdir -p dist/windows
+          cp target/release/gstacousticmultimixer.dll dist/windows/
+          cp LICENSE dist/windows/LICENSE.txt
+          cp README.md dist/windows/
+          scripts/changelog.sh "$version" > dist/windows/CHANGELOG.md
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Load and try it
+        run: |
+          $env:GST_PLUGIN_PATH = "$PWD\dist\windows"
+          $env:GST_REGISTRY = "$env:RUNNER_TEMP\registry.bin"
+          # Into a file first: a pipe closed early (Select-Object -First) would fail gst-inspect-1.0.
+          gst-inspect-1.0 acousticmultimixer > inspect.txt
+          if ($LASTEXITCODE -ne 0) { throw "gst-inspect-1.0 failed" }
+          Get-Content inspect.txt -TotalCount 12
+          $voice = 'audio/x-raw,format=F32LE,rate=48000,channels=1'
+          gst-launch-1.0 -q acousticmultimixer name=m room=cathedral sink_1::x=4 `
+            audiotestsrc num-buffers=200 ! $voice ! m.sink_0 `
+            audiotestsrc num-buffers=200 freq=660 ! $voice ! m.sink_1 `
+            m.mix_0 ! queue ! fakesink m.mix_1 ! queue ! fakesink
+          if ($LASTEXITCODE -ne 0) { throw "gst-launch-1.0 failed" }
+
+      - name: Zip
+        env:
+          VERSION: ${{ steps.build.outputs.version }}
+        run: Compress-Archive -Path dist\windows\* -DestinationPath "dist\gstacousticmultimixer-$env:VERSION-windows-x64.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-x64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: [linux, test, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Make the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KIND: ${{ inputs.kind }}
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ needs.linux.outputs.version }}
+          INTRO: ${{ inputs.intro }}
+        run: |
+          cd dist
+          # GitHub turns "~" in a release file's name into "." (0.1.1~alpha.0.5 → 0.1.1.alpha.0.5), which would no
+          # longer match SHA256SUMS: name the files with the SemVer version instead. The version inside each package
+          # (what apt and dnf read and sort by) keeps its "~".
+          for f in *.deb *.rpm; do [ "$f" = "${f//\~/-}" ] || mv "$f" "${f//\~/-}"; done
+          sha256sum *.deb *.rpm *.zip > SHA256SUMS
+          ls -l
+          intro="${INTRO//\{version\}/$VERSION}"
+          printf '%s\n\n' "${intro//\{sha\}/$(git rev-parse --short=7 HEAD)}" > notes.md
+          cat >> notes.md <<EOF
+          Debian 13 or later, Ubuntu 24.04 or later (x64: amd64, or arm64):
+
+              sudo apt install ./gstreamer1.0-acousticmultimixer_${VERSION}_amd64.deb
+
+          Fedora (x64: x86_64, or arm64: aarch64):
+
+              sudo dnf install ./gstreamer1-acousticmultimixer-${VERSION}-1.x86_64.rpm
+
+          Windows (GStreamer 1.28, MSVC x64): put \`gstacousticmultimixer.dll\` from the zip in GStreamer's
+          \`lib\\gstreamer-1.0\` folder, or in a folder named by \`GST_PLUGIN_PATH\`. SpatialAudioServer's Windows
+          installers include it.
+
+          Check the downloads with \`sha256sum -c SHA256SUMS --ignore-missing\`.
+          EOF
+          if [ "$KIND" = develop-draft ]; then
+            # One rolling pre-release: deleted with its tag and made again at the commit built.
+            gh release delete "$TAG" --yes --cleanup-tag || true
+            gh release create "$TAG" --target "$(git rev-parse HEAD)" --prerelease --latest=false \
+              --title "develop (draft)" --notes-file notes.md *.deb *.rpm *.zip SHA256SUMS
+          else
+            # A draft for the existing version tag (a re-run replaces an earlier draft; a published release stays).
+            if [ "$(gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null)" = true ]; then
+              gh release delete "$TAG" --yes
+            fi
+            prerelease=""
+            case "$VERSION" in *-*) prerelease="--prerelease" ;; esac
+            gh release create "$TAG" --verify-tag --draft $prerelease \
+              --title "acousticmultimixer $VERSION" --notes-file notes.md *.deb *.rpm *.zip SHA256SUMS
+          fi
