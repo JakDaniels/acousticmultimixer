@@ -1,0 +1,49 @@
+# Copyright 2026 Simon Annetts/Jak Daniels
+# SPDX-License-Identifier: MPL-2.0
+
+# Format, lint and test on the oldest GStreamer we support (1.24, Ubuntu 24.04) and the newest (1.28, Ubuntu 26.04).
+# Runs on pull requests and by hand, not on every push (Actions minutes).
+name: ci
+
+on:
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test-${{ matrix.gstreamer }}
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { gstreamer: "1.24", image: "ubuntu:24.04" }
+          - { gstreamer: "1.28", image: "ubuntu:26.04" }
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: GStreamer and build tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good
+      - uses: actions/checkout@v7
+      - name: Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal -c clippy,rustfmt
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.image }}-cargo-${{ hashFiles('Cargo.lock') }}
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
