@@ -40,9 +40,11 @@ version=$(echo "$version" | tr '~' '-')
 grep -q "Version *$version-" inspect.txt || { echo "Expected version $version" >&2; exit 1; }
 
 echo "== a mix"
+# A queue before each sink: the element pushes every output from one thread, and a sink waiting to preroll would
+# hold it before the others had a buffer.
 voice="audio/x-raw,format=F32LE,rate=48000,channels=1"
-gst-launch-1.0 -q acousticmultimixer name=m room=cathedral sink_1::x=4 \
+timeout 60 gst-launch-1.0 -q acousticmultimixer name=m room=cathedral sink_1::x=4 \
   audiotestsrc num-buffers=200 ! "$voice" ! m.sink_0 \
   audiotestsrc num-buffers=200 freq=660 ! "$voice" ! m.sink_1 \
-  m.mix_0 ! fakesink m.mix_1 ! fakesink
+  m.mix_0 ! queue ! fakesink m.mix_1 ! queue ! fakesink
 echo "PASS"

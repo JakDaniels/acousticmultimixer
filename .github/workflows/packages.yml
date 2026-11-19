@@ -113,7 +113,7 @@ jobs:
     name: test (${{ matrix.image }}, ${{ matrix.arch }})
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     container: ${{ matrix.image }}
-    timeout-minutes: 15
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -136,7 +136,7 @@ jobs:
   # GStreamer (installed with its development files into a scratch folder), then loaded and tried with it.
   windows:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     defaults:
       run:
         shell: pwsh
@@ -208,13 +208,15 @@ jobs:
         run: |
           $env:GST_PLUGIN_PATH = "$PWD\dist\windows"
           $env:GST_REGISTRY = "$env:RUNNER_TEMP\registry.bin"
-          gst-inspect-1.0 acousticmultimixer | Select-Object -First 12
+          # Into a file first: a pipe closed early (Select-Object -First) would fail gst-inspect-1.0.
+          gst-inspect-1.0 acousticmultimixer > inspect.txt
           if ($LASTEXITCODE -ne 0) { throw "gst-inspect-1.0 failed" }
+          Get-Content inspect.txt -TotalCount 12
           $voice = 'audio/x-raw,format=F32LE,rate=48000,channels=1'
           gst-launch-1.0 -q acousticmultimixer name=m room=cathedral sink_1::x=4 `
             audiotestsrc num-buffers=200 ! $voice ! m.sink_0 `
             audiotestsrc num-buffers=200 freq=660 ! $voice ! m.sink_1 `
-            m.mix_0 ! fakesink m.mix_1 ! fakesink
+            m.mix_0 ! queue ! fakesink m.mix_1 ! queue ! fakesink
           if ($LASTEXITCODE -ne 0) { throw "gst-launch-1.0 failed" }
 
       - name: Zip
