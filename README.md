@@ -13,6 +13,21 @@ absorption, per-person gain, mute and trims, and rooms (`room`) with early refle
 The plan and the decisions: [PLAN.md](PLAN.md); the original design: [docs/design.md](docs/design.md); what
 changed: [CHANGELOG.md](CHANGELOG.md).
 
+## Installing
+
+Packages are on the [Releases page](https://github.com/JakDaniels/acousticmultimixer/releases), each with its
+`SHA256SUMS`:
+
+- **Debian 13 or later, Ubuntu 24.04 or later** (x64 or arm64): `gstreamer1.0-acousticmultimixer`, e.g.
+  `sudo apt install ./gstreamer1.0-acousticmultimixer_0.1.0_amd64.deb`.
+- **Fedora** (x64 or arm64): `gstreamer1-acousticmultimixer`, e.g.
+  `sudo dnf install ./gstreamer1-acousticmultimixer-0.1.0-1.x86_64.rpm`.
+- **Windows** (GStreamer 1.28, MSVC x64): the zip holds `gstacousticmultimixer.dll`; put it in GStreamer's
+  `lib\gstreamer-1.0` folder, or in a folder named by `GST_PLUGIN_PATH`.
+
+SpatialAudioServer's apt and dnf repositories (https://jakdaniels.github.io/SpatialAudioServer/) carry the Linux
+packages too, and its Windows installers include the DLL.
+
 ## Building
 
 Needs Rust 1.92 or newer (through [rustup](https://rustup.rs)) and GStreamer 1.24 or newer with its development
@@ -23,6 +38,9 @@ cargo build                                                    # target/debug/li
 GST_PLUGIN_PATH=$PWD/target/debug gst-inspect-1.0 acousticmultimixer
 cargo test
 ```
+
+The packages: `scripts/build-packages.sh` (needs [nfpm](https://nfpm.goreleaser.com); the version comes from the git
+tags). Releases are made by merging a pull request from `develop` into `main` (`.github/workflows/release.yml`).
 
 ## Example
 

@@ -1,0 +1,46 @@
+# Copyright 2026 Simon Annetts/Jak Daniels
+# SPDX-License-Identifier: MPL-2.0
+
+# The Fedora package (PLAN.md step 6), Fedora's names and paths. Built by scripts/build-packages.sh, which sets
+# VERSION (SemVer) and ARCH (amd64, arm64: nfpm writes x86_64, aarch64).
+name: gstreamer1-acousticmultimixer
+version: ${VERSION}
+version_schema: semver
+arch: ${ARCH}
+platform: linux
+maintainer: acousticmultimixer developers
+description: |
+  GStreamer mix-minus mixer with acoustic space modelling
+  The acousticmultimixer element gives every participant their own stereo mix
+  of everyone else (mix-minus), placed in a shared virtual space by distance
+  and direction (a simple head model), with early reflections and late reverb
+  from a room preset. Used by SpatialAudioServer's acoustic mix engine.
+homepage: https://github.com/JakDaniels/acousticmultimixer
+license: MPL-2.0
+rpm:
+  group: System Environment/Libraries
+  summary: GStreamer mix-minus mixer with acoustic space modelling
+
+depends:
+  - gstreamer1 >= 1.24
+  - gstreamer1-plugins-base >= 1.24
+  - glib2
+  - glibc
+  - libgcc
+
+contents:
+  - src: dist/stage/libgstacousticmultimixer.so
+    dst: /usr/lib64/gstreamer-1.0/libgstacousticmultimixer.so
+    file_info: { mode: 0755 }
+  - src: README.md
+    dst: /usr/share/doc/gstreamer1-acousticmultimixer/README.md
+    type: doc
+    file_info: { mode: 0644 }
+  - src: dist/stage/CHANGELOG.md
+    dst: /usr/share/doc/gstreamer1-acousticmultimixer/CHANGELOG.md
+    type: doc
+    file_info: { mode: 0644 }
+  - src: LICENSE
+    dst: /usr/share/licenses/gstreamer1-acousticmultimixer/LICENSE
+    type: license
+    file_info: { mode: 0644 }

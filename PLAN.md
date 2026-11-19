@@ -386,6 +386,21 @@ bots).
 - Same known limit as the reflections: GAP input clears a voice's network, cutting its tail.
 
 ### Step 6: packaging and releases (#4)
+**Under way (2026-11-19).** The repository is public (2026-11-19), set up as SpatialAudioServer's: default branch
+`main`; rulesets on `main` (pull request, merge commits only, checks `test-1.28` and `test-1.24`) and `develop` (no
+deletion or force-push); the release labels `minor`, `major`, `publish`.
+- `scripts/version.sh`: the version from the tags, as MinVer gives SpatialAudioServer (0.1.1-alpha.0.N after
+  v0.1.0); `scripts/with-version.sh` writes it into Cargo.toml for a build only (gst-inspect-1.0 shows it).
+- `scripts/build-packages.sh`: `.deb` and `.rpm` with nfpm (`packaging/linux/`), for the machine's architecture,
+  stripped; `/usr/lib/<triplet>/gstreamer-1.0/` and `/usr/lib64/gstreamer-1.0/`; built on Ubuntu 24.04 (GStreamer
+  1.24, glibc 2.39). `scripts/test-packages.sh` installs one and runs a short mix.
+- `packages.yml` (called by `drafts.yml` and `release.yml`, both adapted from SpatialAudioServer's): Linux on x64
+  and arm64 runners (free now the repository is public), tests on Ubuntu 24.04 and 26.04, Debian 13 and Fedora on
+  both architectures, and the Windows DLL against GStreamer 1.28.8 (the installer's `devel` type), loaded and run;
+  the release (zip for Windows, SHA256SUMS) only once everything passed. Workflow artefacts between jobs.
+- Proposed (2026-11-19): no token to start with. Publishing a release would not update SpatialAudioServer's apt/dnf
+  repositories by itself: its `pages` workflow (once it takes the plugin's latest release) is run by hand, or with
+  its next release. A token and a `repository_dispatch` can be added later.
 - As design.md "Packaging": `.deb`/`.rpm` (`gstreamer1.0-acousticmultimixer`, Fedora `gstreamer1-acousticmultimixer`)
   for x64 and arm64, built against 1.24, installed into the system plugin directory; SpatialAudioServer's package
   *recommends* it.

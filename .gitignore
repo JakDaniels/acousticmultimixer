@@ -25,3 +25,6 @@ rustc-ice-*.txt
 
 # Python bytecode (scripts/bench.py)
 __pycache__/
+
+# Packages (scripts/build-packages.sh)
+dist/

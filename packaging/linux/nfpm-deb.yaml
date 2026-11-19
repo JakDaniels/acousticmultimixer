@@ -1,0 +1,43 @@
+# Copyright 2026 Simon Annetts/Jak Daniels
+# SPDX-License-Identifier: MPL-2.0
+
+# The Debian / Ubuntu package (PLAN.md step 6). Built by scripts/build-packages.sh, which sets VERSION (SemVer:
+# nfpm writes pre-releases as 0.1.1~alpha.0.5) and ARCH (amd64, arm64), and fills in @TRIPLET@ (the multiarch
+# folder).
+name: gstreamer1.0-acousticmultimixer
+version: ${VERSION}
+version_schema: semver
+arch: ${ARCH}
+platform: linux
+section: libs
+priority: optional
+maintainer: acousticmultimixer developers
+description: |
+  GStreamer mix-minus mixer with acoustic space modelling
+  The acousticmultimixer element gives every participant their own stereo mix
+  of everyone else (mix-minus), placed in a shared virtual space by distance
+  and direction (a simple head model), with early reflections and late reverb
+  from a room preset. Used by SpatialAudioServer's acoustic mix engine.
+homepage: https://github.com/JakDaniels/acousticmultimixer
+license: MPL-2.0
+
+depends:
+  - libgstreamer1.0-0 (>= 1.24)
+  - libgstreamer-plugins-base1.0-0 (>= 1.24)
+  - libglib2.0-0t64 | libglib2.0-0
+  - libc6 (>= 2.39)
+  - libgcc-s1
+
+contents:
+  - src: dist/stage/libgstacousticmultimixer.so
+    dst: /usr/lib/@TRIPLET@/gstreamer-1.0/libgstacousticmultimixer.so
+    file_info: { mode: 0644 }
+  - src: README.md
+    dst: /usr/share/doc/gstreamer1.0-acousticmultimixer/README.md
+    file_info: { mode: 0644 }
+  - src: dist/stage/CHANGELOG.md
+    dst: /usr/share/doc/gstreamer1.0-acousticmultimixer/CHANGELOG.md
+    file_info: { mode: 0644 }
+  - src: LICENSE
+    dst: /usr/share/doc/gstreamer1.0-acousticmultimixer/copyright
+    file_info: { mode: 0644 }
