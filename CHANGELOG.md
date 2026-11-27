@@ -4,6 +4,8 @@ What changed in each release.
 
 ## Unreleased
 
+## 0.2.0 (2026-11-27)
+
 - Every value of a room preset can be overridden while people talk (`reflection-delays`, `reflection-levels`,
   `wall-cutoff`, `reverb-decay`, `reverb-treble-decay`, `reverb-size`, `room-falloff`, `reflection-spread`,
   `reflection-diffusion`, `near-floor`), and `room-parameters` shows the values in effect; changing the room no
