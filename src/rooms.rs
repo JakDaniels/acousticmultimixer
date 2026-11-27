@@ -11,6 +11,8 @@
 
 use gst::glib;
 
+use crate::dimensions::Derived;
+
 /// One early reflection: arriving `delay_ms` after the direct sound, `gain_db` below a voice heard at the
 /// reference distance.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -257,7 +259,7 @@ pub struct RoomParams {
 
 impl Default for RoomParams {
     fn default() -> Self {
-        Room::Outdoor.params(&RoomOverrides::default())
+        Room::Outdoor.params(&RoomOverrides::default(), None)
     }
 }
 
@@ -323,21 +325,34 @@ impl RoomOverrides {
 }
 
 impl Room {
-    /// The values in effect: the preset's, with the overrides. Outdoors there is no room, so overrides of its
-    /// reflections and reverb have no effect (start from an interior preset instead). Tap delays and levels pair up
-    /// in order (as many taps as the shorter list), sorted by delay; values are kept within working limits.
-    pub fn params(self, o: &RoomOverrides) -> RoomParams {
-        let preset = self.preset();
-        let taps = if self == Room::Outdoor {
+    /// The values in effect: for each, its override, else what the room's dimensions give (`derived`), else the
+    /// preset's. Outdoors without dimensions there is no room, so overrides of its reflections and reverb have no
+    /// effect; with dimensions it is an interior like any other. Tap delays and levels pair up in order (as many
+    /// taps as the shorter list), sorted by delay; values are kept within working limits.
+    pub fn params(self, o: &RoomOverrides, derived: Option<&Derived>) -> RoomParams {
+        let mut preset = self.preset();
+        let derived_taps;
+        if let Some(d) = derived {
+            derived_taps = d.taps.clone();
+            preset = Preset {
+                taps: &[],
+                cutoff_hz: d.cutoff_hz,
+                reverb: Some(d.reverb),
+            };
+        } else {
+            derived_taps = preset.taps.to_vec();
+        }
+        let open = self == Room::Outdoor && derived.is_none();
+        let taps = if open {
             vec![]
         } else {
             let delays: Vec<f64> = if o.delays_ms.is_empty() {
-                preset.taps.iter().map(|t| t.delay_ms).collect()
+                derived_taps.iter().map(|t| t.delay_ms).collect()
             } else {
                 o.delays_ms.clone()
             };
             let levels: Vec<f64> = if o.levels_db.is_empty() {
-                preset.taps.iter().map(|t| t.gain_db).collect()
+                derived_taps.iter().map(|t| t.gain_db).collect()
             } else {
                 o.levels_db.clone()
             };
@@ -351,7 +366,7 @@ impl Room {
             taps
         };
         let cutoff_hz = match o.cutoff_hz {
-            Some(c) if self != Room::Outdoor => {
+            Some(c) if !open => {
                 if c <= 0.0 {
                     f64::INFINITY
                 } else {
@@ -397,7 +412,7 @@ mod tests {
 
     #[test]
     fn without_overrides_a_room_is_its_preset() {
-        let hall = Room::Hall.params(&RoomOverrides::default());
+        let hall = Room::Hall.params(&RoomOverrides::default(), None);
         let preset = Room::Hall.preset();
         assert_eq!(hall.taps, preset.taps);
         assert_eq!(hall.cutoff_hz, preset.cutoff_hz);
@@ -420,7 +435,7 @@ mod tests {
             diffusion: Some(0.0),
             ..RoomOverrides::default()
         };
-        let hall = Room::Hall.params(&o);
+        let hall = Room::Hall.params(&o, None);
         let reverb = hall.reverb.unwrap();
         assert_eq!(reverb.decay_s, 2.0);
         assert_eq!(reverb.treble_decay_s, 0.35); // still the preset's
@@ -440,7 +455,7 @@ mod tests {
             delays_ms: vec![30.0, 10.0, 20.0],
             ..RoomOverrides::default()
         };
-        let p = Room::Hall.params(&o);
+        let p = Room::Hall.params(&o, None);
         assert_eq!(delays(&p), [10.0, 20.0, 30.0]);
         assert_eq!(p.taps[0].gain_db, -12.0); // 10 ms took the second level
         assert!((p.diffusion - 1.0 / 3.0).abs() < 1e-12);
@@ -451,7 +466,7 @@ mod tests {
             ..RoomOverrides::default()
         };
         assert_eq!(
-            delays(&Room::Small.params(&o)),
+            delays(&Room::Small.params(&o, None)),
             [1.0, 2.0, 3.0, 4.0, 5.0, MAX_TAP_DELAY_MS]
         );
     }
@@ -467,9 +482,9 @@ mod tests {
             cutoff_hz: Some(2000.0),
             ..RoomOverrides::default()
         };
-        let reverb = Room::Cave.params(&o).reverb.unwrap();
+        let reverb = Room::Cave.params(&o, None).reverb.unwrap();
         assert_eq!((reverb.treble_decay_s, reverb.size_ms), (0.5, MIN_SIZE_MS));
-        let outdoor = Room::Outdoor.params(&o);
+        let outdoor = Room::Outdoor.params(&o, None);
         assert!(!outdoor.reflects());
         assert_eq!(outdoor.cutoff_hz, f64::INFINITY);
     }

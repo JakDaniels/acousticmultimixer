@@ -8,6 +8,9 @@ What changed in each release.
   `wall-cutoff`, `reverb-decay`, `reverb-treble-decay`, `reverb-size`, `room-falloff`, `reflection-spread`,
   `reflection-diffusion`, `near-floor`), and `room-parameters` shows the values in effect; changing the room no
   longer cuts the reflections and reverb already sounding.
+- A room can be described instead of tuned: its size (`room-width`, `room-depth`, `room-height`), what its walls,
+  floor and ceiling are made of (`wall-material` …, or numbers in `wall-absorption` …) and what is in it
+  (`room-contents`) give its reflections, cutoff and reverb (overrides still win); outdoors with a size is a room.
 
 ## 0.1.0 (2026-11-19)
 

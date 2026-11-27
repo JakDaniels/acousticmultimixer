@@ -530,3 +530,62 @@ fn tuning_a_room_keeps_what_is_sounding() {
     let p = room.mixer.property::<gst::Structure>("room-parameters");
     assert_eq!(p.get::<f64>("reverb-size").unwrap(), 30.0);
 }
+
+#[test]
+fn dimensions_make_a_room_of_outdoors() {
+    let mut room = Room::new(&[true, true], |m| {
+        m.set_property("reverb-level", -60.0);
+    });
+    place(room.pad(0), 0.0, 0.0, 0.0);
+    place(room.pad(1), 2.0, 0.0, 0.0);
+    let out = room.step(&[0.0, 1.0]);
+    assert_constant(out[0].as_ref().unwrap(), (1.0, 1.0), "outdoor");
+
+    // A 10 m cube: the floor's reflection 9.3 ms late, the room heard on top of the voice once settled.
+    for name in ["room-width", "room-depth", "room-height"] {
+        room.mixer.set_property(name, 10.0);
+    }
+    room.mixer.set_property_from_str("floor-material", "carpet");
+    for _ in 0..8 {
+        room.step(&[0.0, 1.0]);
+    }
+    let out = room.step(&[0.0, 1.0]);
+    let left = out[0].as_ref().unwrap()[0];
+    assert!(left > 1.1, "{left}");
+
+    let p = room.mixer.property::<gst::Structure>("room-parameters");
+    let names = |field: &str| -> Vec<String> {
+        p.get::<gst::Array>(field)
+            .unwrap()
+            .iter()
+            .map(|v| v.get::<String>().unwrap())
+            .collect()
+    };
+    assert_eq!(names("derived").len(), 6);
+    assert!(p.get::<f64>("reverb-room-level").is_ok());
+    let floor: Vec<f64> = p
+        .get::<gst::Array>("floor-absorption")
+        .unwrap()
+        .iter()
+        .map(|v| v.get::<f64>().unwrap())
+        .collect();
+    assert_eq!(floor, [0.05, 0.6]);
+
+    // An override takes that value back from the dimensions.
+    room.mixer.set_property("reverb-decay", 1.2);
+    let p = room.mixer.property::<gst::Structure>("room-parameters");
+    assert_eq!(p.get::<f64>("reverb-decay").unwrap(), 1.2);
+    let derived: Vec<String> = p
+        .get::<gst::Array>("derived")
+        .unwrap()
+        .iter()
+        .map(|v| v.get::<String>().unwrap())
+        .collect();
+    assert!(!derived.contains(&"reverb-decay".to_string()));
+
+    // Without a height, outdoors again.
+    room.mixer.set_property("room-height", 0.0);
+    room.step(&[0.0, 1.0]);
+    let out = room.step(&[0.0, 1.0]);
+    assert_constant(out[0].as_ref().unwrap(), (1.0, 1.0), "outdoor again");
+}

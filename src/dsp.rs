@@ -833,7 +833,7 @@ mod tests {
                 t.cutoff[c] = 3000.0;
                 t.diffuse[c] = 1.0;
             }
-            t.room = Room::Cave.params(&RoomOverrides::default());
+            t.room = Room::Cave.params(&RoomOverrides::default(), None);
             t.reverb = 0.0;
             Some(vec![0, 1])
         });
@@ -875,7 +875,7 @@ mod tests {
                 t.reflect[c] = 1.0;
                 t.diffuse[c] = 1.0;
             }
-            t.room = Room::Cave.params(&RoomOverrides::default());
+            t.room = Room::Cave.params(&RoomOverrides::default(), None);
             t.reverb = 0.0; // the taps alone
             Some(vec![0, 1])
         });

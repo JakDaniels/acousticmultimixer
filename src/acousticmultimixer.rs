@@ -73,6 +73,10 @@ use gst::subclass::prelude::*;
 
 use std::sync::{Arc, LazyLock, Mutex};
 
+use crate::dimensions::{
+    ABSORPTION_PROPERTIES, Contents, DERIVED_PROPERTIES, MATERIAL_PROPERTIES, Material,
+    SIZE_PROPERTIES,
+};
 use crate::rooms::MAX_TAP_DELAY_MS;
 use crate::scene::Scene;
 use crate::spatial::{Acoustics, DirectionModel, DistanceModel, DistanceParams};
@@ -118,6 +122,47 @@ fn room_override_list(
             &glib::ParamSpecDouble::builder("value")
                 .minimum(minimum)
                 .maximum(maximum)
+                .build(),
+        )
+        .mutable_playing()
+        .build()
+}
+
+/// One of the room's sizes. With all three given, the room's values come from its dimensions (where no property
+/// overrides them) instead of its preset.
+fn room_size(name: &str, nick: &str, blurb: &str) -> glib::ParamSpec {
+    glib::ParamSpecDouble::builder(name)
+        .nick(nick)
+        .blurb(&format!(
+            "{blurb}; with width, depth and height given, the room's reflections and reverb come from its size, \
+             materials and contents instead of its preset"
+        ))
+        .minimum(0.0)
+        .maximum(1000.0)
+        .default_value(0.0)
+        .mutable_playing()
+        .build()
+}
+
+fn material(name: &str, nick: &str, blurb: &str, default: Material) -> glib::ParamSpec {
+    glib::ParamSpecEnum::builder_with_default(name, default)
+        .nick(nick)
+        .blurb(&format!("{blurb}, with the room's dimensions"))
+        .mutable_playing()
+        .build()
+}
+
+fn absorption(name: &str, nick: &str, what: &str) -> glib::ParamSpec {
+    gst::ParamSpecArray::builder(name)
+        .nick(nick)
+        .blurb(&format!(
+            "How much sound {what} absorb (0-1), overriding their material: <bass, treble>, or one value for both; \
+             empty = the material's"
+        ))
+        .element_spec(
+            &glib::ParamSpecDouble::builder("value")
+                .minimum(0.0)
+                .maximum(1.0)
                 .build(),
         )
         .mutable_playing()
@@ -469,6 +514,23 @@ impl ObjectImpl for AcousticMultiMixer {
                     "Where near-distance's turn-down of a close voice's room stops (m; -1 = 0.5)",
                     100.0,
                 ),
+                // The room's dimensions (dimensions.rs), which take the place of the preset's values
+
+                room_size("room-width", "Room width", "The room's size east to west (m; 0 = not given)"),
+                room_size("room-depth", "Room depth", "The room's size north to south (m; 0 = not given)"),
+                room_size("room-height", "Room height", "The room's height (m; 0 = not given)"),
+                material("wall-material", "Wall material", "What the walls are made of", Material::Plaster),
+                material("floor-material", "Floor material", "What the floor is made of", Material::Wood),
+                material("ceiling-material", "Ceiling material", "What the ceiling is made of", Material::Plaster),
+                absorption("wall-absorption", "Wall absorption", "the walls"),
+                absorption("floor-absorption", "Floor absorption", "the floor"),
+                absorption("ceiling-absorption", "Ceiling absorption", "the ceiling"),
+                glib::ParamSpecEnum::builder_with_default("room-contents", Contents::default())
+                    .nick("Room contents")
+                    .blurb("What is in the room, absorbing sound (furniture and people), with its dimensions")
+                    .mutable_playing()
+                    .build(),
+
                 glib::ParamSpecBoxed::builder::<gst::Structure>("room-parameters")
                     .nick("Room parameters")
                     .blurb("The room's values in effect, its preset's with any overrides, and which are overridden \
@@ -599,6 +661,27 @@ impl ObjectImpl for AcousticMultiMixer {
                 scene.dirty = true;
             }
 
+            name if SIZE_PROPERTIES.contains(&name)
+                || MATERIAL_PROPERTIES.contains(&name)
+                || ABSORPTION_PROPERTIES.contains(&name)
+                || name == "room-contents" =>
+            {
+                let state_guard = self.state.lock().unwrap();
+                let state = state_guard.as_ref().expect("state");
+                let mut scene = state.scene.lock().unwrap();
+                let dims = &mut scene.room_dimensions;
+                if let Some(i) = SIZE_PROPERTIES.iter().position(|&n| n == name) {
+                    dims.size[i] = value.get().unwrap();
+                } else if let Some(i) = MATERIAL_PROPERTIES.iter().position(|&n| n == name) {
+                    dims.materials[i] = value.get().unwrap();
+                } else if let Some(i) = ABSORPTION_PROPERTIES.iter().position(|&n| n == name) {
+                    dims.absorption[i] = numbers(value);
+                } else {
+                    dims.contents = value.get().unwrap();
+                }
+                scene.dirty = true;
+            }
+
             name if ROOM_OVERRIDES.contains(&name) => {
                 let state_guard = self.state.lock().unwrap();
                 let state = state_guard.as_ref().expect("state");
@@ -718,6 +801,25 @@ impl ObjectImpl for AcousticMultiMixer {
                 }
             }
 
+            name if SIZE_PROPERTIES.contains(&name)
+                || MATERIAL_PROPERTIES.contains(&name)
+                || ABSORPTION_PROPERTIES.contains(&name)
+                || name == "room-contents" =>
+            {
+                let state_guard = self.state.lock().unwrap();
+                let state = state_guard.as_ref().expect("state");
+                let dims = state.scene.lock().unwrap().room_dimensions.clone();
+                if let Some(i) = SIZE_PROPERTIES.iter().position(|&n| n == name) {
+                    dims.size[i].to_value()
+                } else if let Some(i) = MATERIAL_PROPERTIES.iter().position(|&n| n == name) {
+                    dims.materials[i].to_value()
+                } else if let Some(i) = ABSORPTION_PROPERTIES.iter().position(|&n| n == name) {
+                    gst::Array::new(dims.absorption[i].clone()).to_value()
+                } else {
+                    dims.contents.to_value()
+                }
+            }
+
             "room-parameters" => {
                 let state_guard = self.state.lock().unwrap();
                 let state = state_guard.as_ref().expect("state");
@@ -763,10 +865,22 @@ impl ObjectImpl for AcousticMultiMixer {
     }
 }
 
-/// `room-parameters`: the room's values in effect (the reverb's only when it has one; `wall-cutoff` 0 = none), and
-/// the names of the properties overriding its preset.
+/// `room-parameters`: the room's values in effect (the reverb's only when it has one; `wall-cutoff` 0 = none), the
+/// names of the properties overriding its preset (`overridden`) and of those its dimensions give (`derived`), and,
+/// with dimensions, the surfaces' absorption in effect (bass, treble).
 fn room_parameters(scene: &Scene) -> gst::Structure {
     let room = scene.room();
+    let overridden = scene.room_overrides.names();
+    let dims = &scene.room_dimensions;
+    let derived: Vec<&str> = if dims.given() {
+        DERIVED_PROPERTIES
+            .iter()
+            .copied()
+            .filter(|n| !overridden.contains(n))
+            .collect()
+    } else {
+        vec![]
+    };
     let mut s = gst::Structure::builder("room-parameters")
         .field("room", scene.acoustics.room)
         .field(
@@ -789,12 +903,20 @@ fn room_parameters(scene: &Scene) -> gst::Structure {
         .field("reflection-spread", room.spread)
         .field("reflection-diffusion", room.diffusion)
         .field("near-floor", room.near_floor)
-        .field("overridden", gst::Array::new(scene.room_overrides.names()))
+        .field("overridden", gst::Array::new(overridden))
+        .field("derived", gst::Array::new(derived))
         .build();
     if let Some(reverb) = room.reverb {
         s.set("reverb-decay", reverb.decay_s);
         s.set("reverb-treble-decay", reverb.treble_decay_s);
         s.set("reverb-size", reverb.size_ms);
+        // The room's own reverb level, which reverb-level adjusts (dB against a voice at the reference distance).
+        s.set("reverb-room-level", reverb.level_db);
+    }
+    if dims.given() {
+        for (i, name) in ABSORPTION_PROPERTIES.iter().enumerate() {
+            s.set(*name, gst::Array::new(dims.absorption(i)));
+        }
     }
     s
 }

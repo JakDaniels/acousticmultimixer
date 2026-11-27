@@ -152,7 +152,7 @@ gst-launch-1.0 acousticmultimixer name=m sink_1::y=4 sink_2::x=8 \
   `room` (early reflections and reverb: `outdoor`, the default, none; `tiny-room`, `small-room`, `big-room`, `hall`,
   `long-hall`, `cave`, `cathedral`); the aggregator properties
   `minus1mixer` already proxies (`latency`, `force-live`, …); `reverb-level` (#1) and `taper`; the room preset's
-  overrides and `room-parameters` (step 7, #7).
+  overrides and `room-parameters` (step 7, #7); the room's dimensions, materials and contents (step 7, #8).
 - Property changes only mark the scene as changed. The gains are recomputed at most once per output buffer, and a
   changed path ramps linearly from the old value to the new one across that buffer (10 ms by default). A new
   participant, or an output just linked, starts at its values: there is nothing to click from.
@@ -449,6 +449,22 @@ deletion or force-push); the release labels `minor`, `major`, `publish`.
   than the kept history starts after its delay), the reverb's lines keep their contents (`Network::adopt`; new
   lengths keep the samples due next), and only a reverb being turned on starts silent. Tap delays jump rather than
   glide when changed (inaudible while tuning so far; a crossfade if it ever matters).
+- **Done (#8, 2026-11-27):** `dimensions.rs`. Decided: absorption by **material** per surface (walls, floor,
+  ceiling: 16 materials, bass and treble coefficients as data, to be tuned by ear; defaults plaster, wood,
+  plaster), overridden by numbers (`wall-absorption` … `<bass, treble>` or one value); **`room-contents`** (empty,
+  sparse, furnished (default), crowded: absorption per m² of floor for furniture and people), because bare
+  surfaces alone give decays far longer than the presets (an empty 4 × 5 × 2.7 m plastered room about 2 s against
+  small-room's 0.4 s; furnished, 0.53 s); the **reverb level derived and calibrated**; **outdoor with a size
+  becomes a room** (without one it stays open). Properties `room-width`, `room-depth`, `room-height` (all three, or
+  none), `wall-`/`floor-`/`ceiling-material`, `-absorption`, `room-contents`; `room-parameters` adds `derived`
+  (values the dimensions give, not overridden), `reverb-room-level` and each surface's absorption in effect.
+  Derivation: Eyring per band (contents as extra absorption, air from `air-absorption` in the treble), the mean
+  free path 4V/S for the size, first-order images for a speaker and listener together in the middle at ear height
+  (1.6 m; opposite walls equally far merge into one tap), the walls' cutoff from the surfaces' treble against bass
+  loss at 4 kHz (none above 18 kHz), the reverb level 16πr²(1 − ā)/Sā at half its dB slope, −11.5 dB, within
+  −20…−10 dB (a crowded 30 × 20 × 12 m hall: −15 dB as the hall preset), reflections 6 dB under the physics. Empty
+  stone rooms ring for many seconds (an empty 30 × 25 × 12 m cave 9 s): physical, and contents or an override
+  shorten them. Hard rooms come out brighter than the presets (no cutoff); to tune by ear.
 - **Order:** #7, #8; then the silence gate (#2) as its own piece, so tuning rooms by ear is not mixed up with the
   gate's change to what is heard (and the gate must let a skipped voice's reflections and reverb die away, not
   cut them); then geometry (#3).

@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::dimensions::{Derived, RoomDimensions};
 use crate::rooms::{RoomOverrides, RoomParams};
 use crate::spatial::{Acoustics, DistanceParams, Orientation, ears, render};
 
@@ -90,6 +91,8 @@ pub struct Scene {
     pub acoustics: Acoustics,
     /// What the room properties change from `acoustics.room`'s preset.
     pub room_overrides: RoomOverrides,
+    /// The room's size and surfaces, which (when given) take the place of the preset's values.
+    pub room_dimensions: RoomDimensions,
     /// Something changed since the gains were last computed.
     pub dirty: bool,
 }
@@ -101,13 +104,22 @@ impl Scene {
             params: DistanceParams::default(),
             acoustics: Acoustics::default(),
             room_overrides: RoomOverrides::default(),
+            room_dimensions: RoomDimensions::default(),
             dirty: true,
         }
     }
 
-    /// The room's values in effect: its preset's, with the overrides.
+    /// What the room's dimensions give, if it has them.
+    pub fn derived(&self) -> Option<Derived> {
+        self.room_dimensions
+            .derive(self.params.reference, self.acoustics.air_absorption)
+    }
+
+    /// The room's values in effect: the overrides, else what its dimensions give, else its preset's.
     pub fn room(&self) -> RoomParams {
-        self.acoustics.room.params(&self.room_overrides)
+        self.acoustics
+            .room
+            .params(&self.room_overrides, self.derived().as_ref())
     }
 
     /// Number of output channels: two per participant.
@@ -341,7 +353,10 @@ mod tests {
         // 8 m away in a hall: the direct sound is 12 dB down (outdoor curve), the reflections 9 dB.
         scene.acoustics.room = Room::Hall;
         scene.compute(&mut paths);
-        assert_eq!(paths.room, Room::Hall.params(&RoomOverrides::default()));
+        assert_eq!(
+            paths.room,
+            Room::Hall.params(&RoomOverrides::default(), None)
+        );
         let i = width; // speaker 1, listener 0's left ear
         assert!((paths.gain[i] - 0.25).abs() < 1e-6);
         let room = 0.25f32.powf(0.75);

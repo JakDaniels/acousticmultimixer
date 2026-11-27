@@ -58,7 +58,8 @@ more than one output linked, put a `queue` after each. `gst-inspect-1.0 acoustic
 element's properties; the pad properties (`x`, `y`, `z`, `yaw`, `pitch`, `roll`, `listener-*`, `gain`, `mute`,
 `trims`) are described in [PLAN.md](PLAN.md#3-the-elements-interface). A room preset's values can be changed while
 it plays, e.g. `m.set_property("reverb-decay", 1.6)` or `reflection-delays="<12.0, 20.0, 33.0, 55.0>"`; the
-element's `room-parameters` shows the values in effect.
+element's `room-parameters` shows the values in effect. Or describe the room and let the element work them out:
+`room-width=12 room-depth=8 room-height=4 floor-material=carpet room-contents=furnished`.
 
 ## Licence
 
