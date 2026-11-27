@@ -13,6 +13,7 @@ use gst::glib;
 use gst::prelude::*;
 
 mod acousticmultimixer;
+mod dimensions;
 mod dsp;
 mod mixer;
 mod pad;

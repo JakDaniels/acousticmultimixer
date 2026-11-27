@@ -295,7 +295,7 @@ pub const DEFAULT_REAR_SHADOW: f64 = 4000.0;
 /// Head model constants (to be tuned by ear). Woodworth's ITD for a spherical head: (r / c)(θ + sin θ), up to
 /// 0.66 ms at the side.
 const HEAD_RADIUS: f64 = 0.0875; // m
-const SPEED_OF_SOUND: f64 = 343.0; // m/s
+pub const SPEED_OF_SOUND: f64 = 343.0; // m/s
 /// Broadband level difference at the side (design.md: −8 dB; less here, since the head shadow adds to it).
 const ILD_SIDE_DB: f64 = 6.0;
 /// Far-ear low-pass at the side (Hz), easing towards none straight ahead.

@@ -7,22 +7,15 @@
 
 use std::collections::BTreeMap;
 
-use crate::rooms::Room;
+use crate::dimensions::{Derived, RoomDimensions};
+use crate::rooms::{RoomOverrides, RoomParams};
 use crate::spatial::{Acoustics, DistanceParams, Orientation, ears, render};
 
-/// How fast a voice's reflections and reverb fall with distance, against its direct sound (in dB). Half (as at
-/// first) left distant voices too loud right up to the edge of the range.
-const ROOM_FALLOFF: f64 = 0.75;
-
-/// Close up the direct sound stays at full volume (within the reference distance, so nearby voices are not too
-/// loud), so instead the room is turned down closer than the near distance: 6 dB per halving of the distance, down
-/// to this distance (m), as a voice right next to you stands out from the room.
-const NEAR_FLOOR: f64 = 0.5;
-
-/// The room's share of a voice closer than `near` (1 at and beyond it; `near` 0 = always 1).
-fn nearness(distance: f64, near: f64) -> f64 {
+/// The room's share of a voice closer than `near` (1 at and beyond it; `near` 0 = always 1), turned down 6 dB per
+/// halving of the distance until `floor` (`rooms::NEAR_FLOOR` unless overridden).
+fn nearness(distance: f64, near: f64, floor: f64) -> f64 {
     if distance < near {
-        distance.max(NEAR_FLOOR).min(near) / near
+        distance.max(floor).min(near) / near
     } else {
         1.0
     }
@@ -96,6 +89,10 @@ pub struct Scene {
     pub participants: Vec<Participant>,
     pub params: DistanceParams,
     pub acoustics: Acoustics,
+    /// What the room properties change from `acoustics.room`'s preset.
+    pub room_overrides: RoomOverrides,
+    /// The room's size and surfaces, which (when given) take the place of the preset's values.
+    pub room_dimensions: RoomDimensions,
     /// Something changed since the gains were last computed.
     pub dirty: bool,
 }
@@ -106,8 +103,23 @@ impl Scene {
             participants: vec![Participant::default(); max_participants],
             params: DistanceParams::default(),
             acoustics: Acoustics::default(),
+            room_overrides: RoomOverrides::default(),
+            room_dimensions: RoomDimensions::default(),
             dirty: true,
         }
+    }
+
+    /// What the room's dimensions give, if it has them.
+    pub fn derived(&self) -> Option<Derived> {
+        self.room_dimensions
+            .derive(self.params.reference, self.acoustics.air_absorption)
+    }
+
+    /// The room's values in effect: the overrides, else what its dimensions give, else its preset's.
+    pub fn room(&self) -> RoomParams {
+        self.acoustics
+            .room
+            .params(&self.room_overrides, self.derived().as_ref())
     }
 
     /// Number of output channels: two per participant.
@@ -148,10 +160,9 @@ impl Scene {
         let width = self.width();
         assert_eq!(paths.gain.len(), self.participants.len() * width);
         paths.clear();
-        paths.room = self.acoustics.room;
+        let room = self.room();
+        let reflecting = room.reflects();
         paths.reverb = self.acoustics.reverb_factor() as f32;
-        let preset = self.acoustics.room.preset();
-        let reflecting = !preset.taps.is_empty() || preset.reverb.is_some();
 
         for (s, speaker) in self.participants.iter().enumerate() {
             if !speaker.active || speaker.mute || speaker.gain <= 0.0 {
@@ -171,11 +182,11 @@ impl Scene {
                 // dB), so the further away a voice is, the more of it is the room, yet it still fades; close up,
                 // the room gives way to the voice.
                 let near = if positioned {
-                    nearness(r.distance, self.acoustics.near_distance)
+                    nearness(r.distance, self.acoustics.near_distance, room.near_floor)
                 } else {
                     1.0
                 };
-                let reflected = r.gain.powf(ROOM_FALLOFF) * near * speaker.gain * trim;
+                let reflected = r.gain.powf(room.falloff) * near * speaker.gain * trim;
                 r.gain *= speaker.gain * trim;
                 for (ear, e) in ears(&r, &self.acoustics).into_iter().enumerate() {
                     let i = s * width + 2 * l + ear;
@@ -192,6 +203,7 @@ impl Scene {
             }
         }
 
+        paths.room = room;
         self.dirty = false;
         let mut fresh = vec![];
         for (n, p) in self.participants.iter_mut().enumerate() {
@@ -215,7 +227,7 @@ pub struct PathTable {
     pub cutoff: Vec<f32>,
     pub reflect: Vec<f32>,
     pub diffuse: Vec<f32>,
-    pub room: Room,
+    pub room: RoomParams,
     pub reverb: f32,
 }
 
@@ -227,7 +239,7 @@ impl PathTable {
             cutoff: vec![f32::INFINITY; len],
             reflect: vec![0.0; len],
             diffuse: vec![0.0; len],
-            room: Room::default(),
+            room: RoomParams::default(),
             reverb: 1.0,
         }
     }
@@ -244,6 +256,7 @@ impl PathTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rooms::Room;
 
     fn pair(paths: &PathTable, width: usize, s: usize, l: usize) -> (f32, f32) {
         (
@@ -340,7 +353,10 @@ mod tests {
         // 8 m away in a hall: the direct sound is 12 dB down (outdoor curve), the reflections 9 dB.
         scene.acoustics.room = Room::Hall;
         scene.compute(&mut paths);
-        assert_eq!(paths.room, Room::Hall);
+        assert_eq!(
+            paths.room,
+            Room::Hall.params(&RoomOverrides::default(), None)
+        );
         let i = width; // speaker 1, listener 0's left ear
         assert!((paths.gain[i] - 0.25).abs() < 1e-6);
         let room = 0.25f32.powf(0.75);
@@ -368,5 +384,16 @@ mod tests {
         scene.acoustics.near_distance = 0.0;
         scene.compute(&mut paths);
         assert!((paths.diffuse[i] - 1.0).abs() < 1e-6);
+
+        // Overridden: the room falling as fast as the voice, and the near turn-down going on to 0.25 m.
+        scene.room_overrides.falloff = Some(1.0);
+        scene.participants[1].position = [8.0, 0.0, 0.0];
+        scene.compute(&mut paths);
+        assert!((paths.diffuse[i] - 0.25).abs() < 1e-6);
+        scene.room_overrides.near_floor = Some(0.25);
+        scene.acoustics.near_distance = 2.0;
+        scene.participants[1].position = [0.25, 0.0, 0.0];
+        scene.compute(&mut paths);
+        assert!((paths.diffuse[i] - 0.125).abs() < 1e-6);
     }
 }
