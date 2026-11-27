@@ -12,7 +12,8 @@ spatial rooms; the aim is for it to be generally useful and, in time, to be offe
   reflections and room presets, step 3's head model and step 2's distance and pan; SpatialAudioServer's `acoustic` engine uses the element, and its rooms choose a preset.
   Open work is in this repository's GitHub issues (on the shared project board,
   https://github.com/users/JakDaniels/projects/1); this plan keeps the design and the decisions, and links to them:
-  step 5, late reverb (#1); the silence gate (#2); geometry (#3); step 6, packaging (#4).
+  step 5, late reverb (#1); the silence gate (#2); geometry (#3); step 6, packaging (#4); step 7, room
+  parameters (#7) and dimensions (#8).
 
 ## 1. Decisions so far
 
@@ -298,13 +299,14 @@ everyone still receiving), and capacity (numbers reused, refusal when full or ou
 - Per path, a few taps (4 to start) from the speaker's history ring: delay and gain from the room preset and the
   distance, panned progressively wider (design.md, "Reflection positioning").
 - Presets as data (delays, gains, absorption, reverb settings), so new rooms need no code.
-- The history ring grows to the longest tap (a cave's 430 ms ≈ 20,600 samples per input at 48 kHz: 82 KB, fine).
+- The history ring grows to the longest tap (step 4's cave, 430 ms ≈ 20,600 samples per input at 48 kHz: 82 KB, fine; its taps now end at 110 ms).
 
 **Done (2026-11-18), listening-tested from Firestorm** (each preset sounds different; changing it while people talk
 is seamless).
 - `room` property; presets in `rooms.rs` as data: four taps each (delay after the direct sound, level at the
   reference distance) and a one-pole low-pass for the walls. small-room 3/7/11/17 ms, −9…−19 dB, 6 kHz; hall
-  15/25/40/70 ms, −10…−19 dB, 5 kHz; cave 80/140/220/430 ms, −8…−20 dB, 3 kHz; outdoor none.
+  15/25/40/70 ms, −10…−19 dB, 5 kHz; cave 80/140/220/430 ms, −8…−20 dB, 3 kHz (25/45/70/110 ms since step 5, which
+  also added four presets: the current values are in step 5); outdoor none.
 - The taps' delays are the same for every listener, so not per path as first planned: each speaker's
   reflections are made once, from a ring of its input (a power of two above the longest tap, allocated when the
   room changes), as three signals: a directional part (tap k contributes 1 − (k + 1)/n of its level) and left and
@@ -414,6 +416,30 @@ deletion or force-push); the release labels `minor`, `major`, `publish`.
   `pages.yml` add them to the signed apt/dnf repositories, so the server package's *recommends* resolves there (needs
   a token secret here with access to that repository: a fine-grained token or a GitHub App). SpatialAudioServer's
   MSI build downloads the DLL from a pinned release of this repository, so each installer ships a known version.
+
+### Step 7: room parameters (#7) and dimensions (#8)
+**Decided (2026-11-27).** Rooms are tuned live from SpatialAudioServer's admin UI and in-world scripts
+(SpatialAudioServer#31, os-webrtc-sas#13), not only by choosing a preset.
+- **Overrides on presets**, not fully custom rooms: `room` still chooses the preset, and each of its values can be
+  overridden by a property of its own (unset = the preset's). **All of them are exposed:** the taps' delays and
+  levels (`reflection-delays`, `reflection-levels`: lists, so the number of taps can change), `wall-cutoff`,
+  `reverb-decay`, `reverb-treble-decay`, `reverb-size`, and the constants every preset shares today:
+  `room-falloff` (`ROOM_FALLOFF`), `reflection-spread` (`SPREAD`), `reflection-diffusion` (`diffuse_share`) and
+  `near-floor` (`NEAR_FLOOR`). The preset's reverb level stays covered by `reverb-level`. Names and the list
+  format to settle in #7; these property names are used everywhere (SpatialAudioServer's API in camelCase,
+  notecards as they are).
+- A read-only `room-parameters` structure gives the values in effect and where each came from (preset,
+  dimensions, override), so a UI can show a preset's values before anything is changed.
+- **Derived from dimensions** (#8): width, depth, height and the surfaces' absorption (bass and treble) give the
+  decay times (Sabine or Eyring), the size (mean free path 4V/S), first-order tap delays and levels for a speaker
+  and listener near the middle, and the walls' cutoff. Computed when the room changes, so no cost per sample.
+  Precedence per value: override, then dimensions, then preset. The same dimensions later feed the per-path image
+  sources (#3).
+- Changes stay seamless while people talk, including those that resize memory (a longer last tap grows the
+  history ring; a new `reverb-size` changes the delay lines).
+- **Order:** #7, #8; then the silence gate (#2) as its own piece, so tuning rooms by ear is not mixed up with the
+  gate's change to what is heard (and the gate must let a skipped voice's reflections and reverb die away, not
+  cut them); then geometry (#3).
 
 ### Later
 - Room geometry and image-source reflections (design.md "Future geometry support"; first-order, for a box room: #3).
