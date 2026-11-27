@@ -56,7 +56,9 @@ What participant 0 hears, at the origin facing east (+x): the ticks 4 m to the l
 Inputs are `sink_0` to `sink_31` (`max-participants`, default 32), each with its own stereo output `mix_N`; with
 more than one output linked, put a `queue` after each. `gst-inspect-1.0 acousticmultimixer` lists the
 element's properties; the pad properties (`x`, `y`, `z`, `yaw`, `pitch`, `roll`, `listener-*`, `gain`, `mute`,
-`trims`) are described in [PLAN.md](PLAN.md#3-the-elements-interface).
+`trims`) are described in [PLAN.md](PLAN.md#3-the-elements-interface). A room preset's values can be changed while
+it plays, e.g. `m.set_property("reverb-decay", 1.6)` or `reflection-delays="<12.0, 20.0, 33.0, 55.0>"`; the
+element's `room-parameters` shows the values in effect.
 
 ## Licence
 

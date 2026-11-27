@@ -17,7 +17,7 @@
 //! so it reaches each listener at that path's diffuse level, and never the speaker themselves.
 
 use crate::reverb::{self, Network};
-use crate::rooms::{Room, SPREAD, diffuse_share};
+use crate::rooms::RoomParams;
 use crate::scene::PathTable;
 use crate::spatial::{MAX_ITD, NO_FILTER_HZ};
 
@@ -38,22 +38,22 @@ struct Taps {
 }
 
 impl Taps {
-    fn new(room: Room, rate: f64) -> Self {
-        let preset = room.preset();
-        let n = preset.taps.len();
+    fn new(room: &RoomParams, rate: f64) -> Self {
         let mut taps = Taps {
-            pole: pole(preset.cutoff_hz, rate),
+            pole: pole(room.cutoff_hz, rate),
             ..Taps::default()
         };
-        for (k, t) in preset.taps.iter().enumerate() {
+        for (k, t) in room.taps.iter().enumerate() {
             let samples = |ms: f64| ((ms / 1000.0 * rate).round() as usize).max(1);
             // Alternately earlier on the left and on the right.
             let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
             taps.centre.push(samples(t.delay_ms));
-            taps.left.push(samples(t.delay_ms * (1.0 - sign * SPREAD)));
-            taps.right.push(samples(t.delay_ms * (1.0 + sign * SPREAD)));
+            taps.left
+                .push(samples(t.delay_ms * (1.0 - sign * room.spread)));
+            taps.right
+                .push(samples(t.delay_ms * (1.0 + sign * room.spread)));
             let gain = 10f64.powf(t.gain_db / 20.0);
-            let share = diffuse_share(k, n);
+            let share = room.diffuse_share(k);
             taps.directional.push((gain * (1.0 - share)) as f32);
             taps.diffuse.push((gain * share) as f32);
         }
@@ -109,9 +109,9 @@ pub struct Paths {
     filter: Vec<f32>,
     history: Vec<Vec<f32>>,
     next_pos: Vec<u64>,
-    /// The room's taps, each speaker's ring of input for them (and where it writes next), and the walls' filter
-    /// memory for its three reflection signals.
-    room: Room,
+    /// The room's values, its taps, each speaker's ring of input for them (and where it writes next), and the
+    /// walls' filter memory for its three reflection signals.
+    room: RoomParams,
     taps: Taps,
     ring: Vec<Vec<f32>>,
     ring_at: Vec<usize>,
@@ -159,7 +159,7 @@ impl Paths {
             filter: vec![0.0; len],
             history: vec![vec![0.0; history_len]; rows],
             next_pos: vec![u64::MAX; rows],
-            room: Room::Outdoor,
+            room: RoomParams::default(),
             taps: Taps::default(),
             ring: vec![vec![]; rows],
             ring_at: vec![0; rows],
@@ -259,25 +259,35 @@ impl Paths {
         self.diffuse_end.copy_from_slice(&self.table.diffuse);
         let level = self.table.reverb;
         if self.table.room != self.room || (level == 0.0) != (self.reverb_level == 0.0) {
-            // A new room (or its reverb turned on or off): its taps, and rings long enough for them (empty
-            // outdoors), and its reverb, all starting silent.
-            self.room = self.table.room;
-            self.taps = Taps::new(self.room, self.rate);
-            self.reverb = self
+            // A changed room (or its reverb turned on or off): its taps, rings long enough for them (empty
+            // outdoors) and its reverb. What is already sounding carries on: the rings keep their latest input and
+            // the reverb's lines their contents, so a room can be tuned while people talk without cutting its
+            // sound; only a reverb turned on starts silent.
+            self.room = self.table.room.clone();
+            let taps = Taps::new(&self.room, self.rate);
+            if taps.ring_len != self.taps.ring_len {
+                for row in 0..self.rows {
+                    self.ring[row] = resize_ring(&self.ring[row], self.ring_at[row], taps.ring_len);
+                }
+            }
+            if !taps.any() {
+                self.wall.fill([0.0; 3]);
+            }
+            self.taps = taps;
+            let reverb = self
                 .room
-                .preset()
                 .reverb
                 .filter(|_| level > 0.0)
                 .map(|r| Network::new(&r, self.rate));
             for row in 0..self.rows {
-                self.ring[row] = vec![0.0; self.taps.ring_len];
-                self.ring_at[row] = 0;
-                self.wall[row] = [0.0; 3];
-                self.reverb_state[row] = self
-                    .reverb
-                    .as_ref()
-                    .map_or_else(reverb::State::default, Network::state);
+                let old = std::mem::take(&mut self.reverb_state[row]);
+                self.reverb_state[row] = match (&reverb, &self.reverb) {
+                    (Some(new), Some(was)) => new.adopt(was, old),
+                    (Some(new), None) => new.state(),
+                    (None, _) => reverb::State::default(),
+                };
             }
+            self.reverb = reverb;
         }
         self.reverb_level = level;
         if let Some(net) = &mut self.reverb {
@@ -555,6 +565,20 @@ impl Drop for FlushDenormals {
     }
 }
 
+/// A speaker's ring resized to `len` (a power of two, or 0), keeping its latest samples where the same write
+/// position (`at`, which keeps counting) finds them.
+fn resize_ring(ring: &[f32], at: usize, len: usize) -> Vec<f32> {
+    let mut resized = vec![0.0; len];
+    if !ring.is_empty() && len > 0 {
+        let (old_mask, mask) = (ring.len() - 1, len - 1);
+        for back in 1..=ring.len().min(len) {
+            let i = at.wrapping_sub(back);
+            resized[i & mask] = ring[i & old_mask];
+        }
+    }
+    resized
+}
+
 /// The one-pole low-pass coefficient for a cut-off (1 = no filter).
 fn pole(cutoff: f64, rate: f64) -> f32 {
     if !cutoff.is_finite() || cutoff >= NO_FILTER_HZ || cutoff >= 0.45 * rate {
@@ -680,6 +704,7 @@ fn mix_ears(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rooms::{Room, RoomOverrides};
 
     const RATE: f64 = 48_000.0;
 
@@ -808,7 +833,7 @@ mod tests {
                 t.cutoff[c] = 3000.0;
                 t.diffuse[c] = 1.0;
             }
-            t.room = Room::Cave;
+            t.room = Room::Cave.params(&RoomOverrides::default());
             t.reverb = 0.0;
             Some(vec![0, 1])
         });
@@ -824,6 +849,24 @@ mod tests {
     }
 
     #[test]
+    fn a_resized_ring_keeps_its_latest_input() {
+        let ring: Vec<f32> = (0..8).map(|i| i as f32).collect();
+        // Written up to 13 (at 13 & 7 = 5 next): the latest is 12 → index 4, then 11 → 3, …
+        let grown = resize_ring(&ring, 13, 16);
+        for back in 1..=8usize {
+            let i = 13 - back;
+            assert_eq!(grown[i & 15], ring[i & 7], "{back}");
+        }
+        let shrunk = resize_ring(&ring, 13, 4);
+        assert_eq!(
+            shrunk,
+            [ring[12 & 7], ring[9 & 7], ring[10 & 7], ring[11 & 7]]
+        );
+        assert!(resize_ring(&ring, 13, 0).is_empty());
+        assert_eq!(resize_ring(&[], 13, 4), [0.0; 4]);
+    }
+
+    #[test]
     fn reflections_arrive_at_the_taps_delays() {
         let mut p = Paths::new(2, 4, RATE);
         p.next_buffer(512, |t| {
@@ -832,7 +875,7 @@ mod tests {
                 t.reflect[c] = 1.0;
                 t.diffuse[c] = 1.0;
             }
-            t.room = Room::Cave;
+            t.room = Room::Cave.params(&RoomOverrides::default());
             t.reverb = 0.0; // the taps alone
             Some(vec![0, 1])
         });

@@ -4,6 +4,11 @@ What changed in each release.
 
 ## Unreleased
 
+- Every value of a room preset can be overridden while people talk (`reflection-delays`, `reflection-levels`,
+  `wall-cutoff`, `reverb-decay`, `reverb-treble-decay`, `reverb-size`, `room-falloff`, `reflection-spread`,
+  `reflection-diffusion`, `near-floor`), and `room-parameters` shows the values in effect; changing the room no
+  longer cuts the reflections and reverb already sounding.
+
 ## 0.1.0 (2026-11-19)
 
 - First version: a mix-minus mixer (every output hears all the other inputs), based on gst-plugins-rs's

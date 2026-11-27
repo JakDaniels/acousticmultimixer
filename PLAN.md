@@ -151,7 +151,8 @@ gst-launch-1.0 acousticmultimixer name=m sink_1::y=4 sink_2::x=8 \
   exactly), `rear-shadow` (`head` only: the low-pass cut-off for a voice straight behind, default 4000 Hz) and
   `room` (early reflections and reverb: `outdoor`, the default, none; `tiny-room`, `small-room`, `big-room`, `hall`,
   `long-hall`, `cave`, `cathedral`); the aggregator properties
-  `minus1mixer` already proxies (`latency`, `force-live`, …); `reverb-level` (#1) and `taper`.
+  `minus1mixer` already proxies (`latency`, `force-live`, …); `reverb-level` (#1) and `taper`; the room preset's
+  overrides and `room-parameters` (step 7, #7).
 - Property changes only mark the scene as changed. The gains are recomputed at most once per output buffer, and a
   changed path ramps linearly from the old value to the new one across that buffer (10 ms by default). A new
   participant, or an output just linked, starts at its values: there is nothing to click from.
@@ -437,6 +438,17 @@ deletion or force-push); the release labels `minor`, `major`, `publish`.
   sources (#3).
 - Changes stay seamless while people talk, including those that resize memory (a longer last tap grows the
   history ring; a new `reverb-size` changes the delay lines).
+- **Done (#7, 2026-11-27):** the overrides, as decided above. Doubles default to −1 (the preset's;
+  `wall-cutoff` 0 = no filter); the taps are two `GstValueArray`s of doubles (`<15.0, 25.0>`, integers accepted;
+  empty = the preset's), paired in order, as many taps as the shorter list (at most 16, delays up to 500 ms), sorted
+  by delay. `reflection-diffusion` is the first tap's share heard from all around, rising evenly to all of it for the
+  last (the presets' (k + 1)/n is 1/n). Values are kept workable (decays at least 0.05 s, the treble at most the
+  bass, size at least 1 ms). Outdoor stays without a room: overrides of its reflections and reverb have no effect.
+  `room-parameters` (read-only structure) gives the values in effect and `overridden`, the properties set. Any room
+  change now keeps what is sounding: each speaker's ring is resized keeping its latest input (a tap moved later
+  than the kept history starts after its delay), the reverb's lines keep their contents (`Network::adopt`; new
+  lengths keep the samples due next), and only a reverb being turned on starts silent. Tap delays jump rather than
+  glide when changed (inaudible while tuning so far; a crossfade if it ever matters).
 - **Order:** #7, #8; then the silence gate (#2) as its own piece, so tuning rooms by ear is not mixed up with the
   gate's change to what is heard (and the gate must let a skipped voice's reflections and reverb die away, not
   cut them); then geometry (#3).

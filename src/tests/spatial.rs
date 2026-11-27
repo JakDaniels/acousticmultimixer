@@ -427,3 +427,106 @@ fn room_adds_a_reverb_tail_but_not_your_own() {
         }
     }
 }
+
+#[test]
+fn room_overrides_replace_the_presets_values() {
+    let mut room = Room::new(&[true, true], |m| {
+        m.set_property_from_str("room", "small-room");
+        m.set_property("reverb-level", -60.0);
+        // Two reflections instead of the preset's four, the levels written as integers.
+        m.set_property_from_str("reflection-delays", "<5.0, 10.0>");
+        m.set_property_from_str("reflection-levels", "<-6, -12>");
+    });
+    place(room.pad(0), 0.0, 0.0, 0.0);
+    place(room.pad(1), 2.0, 0.0, 0.0);
+
+    // The first arrives 5 ms late (4.6 ms in the left ear).
+    let out = room.step(&[0.0, 1.0]);
+    let frames: Vec<_> = out[0].as_ref().unwrap().as_chunks::<2>().0.to_vec();
+    assert!(
+        frames[..221].iter().all(|f| f == &[1.0, 1.0]),
+        "direct only"
+    );
+    assert!(frames[221][0] > 1.0, "first reflection");
+    room.step(&[0.0, 1.0]);
+    let out = room.step(&[0.0, 1.0]);
+    let taps = 10f64.powf(-6.0 / 20.0) + 10f64.powf(-12.0 / 20.0);
+    assert_constant(
+        out[0].as_ref().unwrap(),
+        (1.0 + taps, 1.0 + taps),
+        "two taps",
+    );
+
+    let p = room.mixer.property::<gst::Structure>("room-parameters");
+    let list = |name: &str| -> Vec<f64> {
+        p.get::<gst::Array>(name)
+            .unwrap()
+            .iter()
+            .map(|v| v.get::<f64>().unwrap())
+            .collect()
+    };
+    assert_eq!(list("reflection-delays"), [5.0, 10.0]);
+    assert_eq!(list("reflection-levels"), [-6.0, -12.0]);
+    assert_eq!(p.get::<f64>("wall-cutoff").unwrap(), 6000.0);
+    assert_eq!(p.get::<f64>("reverb-decay").unwrap(), 0.4);
+    let overridden: Vec<String> = p
+        .get::<gst::Array>("overridden")
+        .unwrap()
+        .iter()
+        .map(|v| v.get::<String>().unwrap())
+        .collect();
+    assert_eq!(overridden, ["reflection-delays", "reflection-levels"]);
+    assert_eq!(room.mixer.property::<f64>("reverb-decay"), -1.0);
+
+    // Back to the preset's: empty lists.
+    room.mixer
+        .set_property("reflection-delays", gst::Array::new(Vec::<f64>::new()));
+    room.mixer
+        .set_property("reflection-levels", gst::Array::new(Vec::<f64>::new()));
+    for _ in 0..3 {
+        room.step(&[0.0, 1.0]);
+    }
+    let out = room.step(&[0.0, 1.0]);
+    let taps: f64 = [-9.0f64, -12.0, -15.0, -19.0]
+        .iter()
+        .map(|db| 10f64.powf(db / 20.0))
+        .sum();
+    assert_constant(out[0].as_ref().unwrap(), (1.0 + taps, 1.0 + taps), "preset");
+}
+
+#[test]
+fn tuning_a_room_keeps_what_is_sounding() {
+    let mut room = Room::new(&[true, true], |m| {
+        m.set_property_from_str("room", "small-room");
+        m.set_property("reverb-level", -60.0);
+    });
+    place(room.pad(0), 0.0, 0.0, 0.0);
+    place(room.pad(1), 2.0, 0.0, 0.0);
+    for _ in 0..3 {
+        room.step(&[0.0, 1.0]);
+    }
+    // Shorter reflections, the same levels: the next buffer is already settled, as the ring kept its input.
+    room.mixer
+        .set_property_from_str("reflection-delays", "<1.0, 2.0, 3.0, 4.0>");
+    let out = room.step(&[0.0, 1.0]);
+    let taps: f64 = [-9.0f64, -12.0, -15.0, -19.0]
+        .iter()
+        .map(|db| 10f64.powf(db / 20.0))
+        .sum();
+    assert_constant(out[0].as_ref().unwrap(), (1.0 + taps, 1.0 + taps), "kept");
+
+    // The reverb: a burst, then its tail carries on through a new decay time and a new size.
+    room.mixer.set_property("reverb-level", 0.0);
+    let energy = |out: &[f32]| out.iter().map(|&v| (v as f64).powi(2)).sum::<f64>();
+    for k in 0..6 {
+        room.step(&[0.0, if k == 0 { 1.0 } else { 0.0 }]);
+    }
+    room.mixer.set_property("reverb-decay", 1.0);
+    let out = room.step(&[0.0, 0.0]);
+    assert!(energy(out[0].as_ref().unwrap()) > 1e-6, "tail after decay");
+    room.mixer.set_property("reverb-size", 30.0);
+    let out = room.step(&[0.0, 0.0]);
+    assert!(energy(out[0].as_ref().unwrap()) > 1e-6, "tail after size");
+    let p = room.mixer.property::<gst::Structure>("room-parameters");
+    assert_eq!(p.get::<f64>("reverb-size").unwrap(), 30.0);
+}

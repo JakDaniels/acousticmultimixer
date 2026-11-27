@@ -73,8 +73,78 @@ use gst::subclass::prelude::*;
 
 use std::sync::{Arc, LazyLock, Mutex};
 
+use crate::rooms::MAX_TAP_DELAY_MS;
 use crate::scene::Scene;
 use crate::spatial::{Acoustics, DirectionModel, DistanceModel, DistanceParams};
+
+/// The properties that override a value of the room's preset (−1, or an empty list: the preset's).
+const ROOM_OVERRIDES: [&str; 10] = [
+    "reflection-delays",
+    "reflection-levels",
+    "wall-cutoff",
+    "reverb-decay",
+    "reverb-treble-decay",
+    "reverb-size",
+    "room-falloff",
+    "reflection-spread",
+    "reflection-diffusion",
+    "near-floor",
+];
+
+/// A property overriding one of the room preset's numbers: −1 (the default) leaves the preset's.
+fn room_override(name: &str, nick: &str, blurb: &str, maximum: f64) -> glib::ParamSpec {
+    glib::ParamSpecDouble::builder(name)
+        .nick(nick)
+        .blurb(blurb)
+        .minimum(-1.0)
+        .maximum(maximum)
+        .default_value(-1.0)
+        .mutable_playing()
+        .build()
+}
+
+/// A property overriding the preset's list of tap delays or levels: empty (the default) leaves the preset's.
+fn room_override_list(
+    name: &str,
+    nick: &str,
+    blurb: &str,
+    minimum: f64,
+    maximum: f64,
+) -> glib::ParamSpec {
+    gst::ParamSpecArray::builder(name)
+        .nick(nick)
+        .blurb(blurb)
+        .element_spec(
+            &glib::ParamSpecDouble::builder("value")
+                .minimum(minimum)
+                .maximum(maximum)
+                .build(),
+        )
+        .mutable_playing()
+        .build()
+}
+
+/// The numbers in a list property (accepting integers too, as "<10, 20>" parses to them).
+fn numbers(value: &glib::Value) -> Vec<f64> {
+    let Ok(array) = value.get::<gst::Array>() else {
+        return vec![];
+    };
+    array
+        .iter()
+        .filter_map(|v| {
+            v.get::<f64>()
+                .ok()
+                .or_else(|| v.get::<i32>().ok().map(f64::from))
+                .or_else(|| v.get::<f32>().ok().map(f64::from))
+        })
+        .collect()
+}
+
+/// −1 (or any negative value) is "the preset's".
+fn optional(value: &glib::Value) -> Option<f64> {
+    let v = value.get::<f64>().unwrap();
+    (v >= 0.0).then_some(v)
+}
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
@@ -326,6 +396,86 @@ impl ObjectImpl for AcousticMultiMixer {
                     .mutable_playing()
                     .build(),
 
+                // Overrides of the room preset's values (rooms.rs)
+
+                room_override_list(
+                    "reflection-delays",
+                    "Reflection delays",
+                    "The early reflections' delays after the direct sound (ms), overriding the room preset's; paired \
+                     in order with reflection-levels (as many reflections as the shorter list, up to 16), e.g. \
+                     <15.0, 25.0, 40.0, 70.0>; empty = the preset's",
+                    0.0,
+                    MAX_TAP_DELAY_MS,
+                ),
+                room_override_list(
+                    "reflection-levels",
+                    "Reflection levels",
+                    "The early reflections' levels (dB, against a voice at the reference distance), overriding the \
+                     room preset's; empty = the preset's",
+                    -80.0,
+                    12.0,
+                ),
+                room_override(
+                    "wall-cutoff",
+                    "Wall cut-off",
+                    "Low-pass cut-off for the reflections (Hz): the walls' treble absorption (0 = none; -1 = the room \
+                     preset's)",
+                    24000.0,
+                ),
+                room_override(
+                    "reverb-decay",
+                    "Reverb decay",
+                    "Time for the late reverb to fall by 60 dB in the bass (s; at least 0.05; -1 = the room preset's)",
+                    20.0,
+                ),
+                room_override(
+                    "reverb-treble-decay",
+                    "Reverb treble decay",
+                    "Time for the late reverb to fall by 60 dB in the treble (s; at most reverb-decay; -1 = the room \
+                     preset's)",
+                    20.0,
+                ),
+                room_override(
+                    "reverb-size",
+                    "Reverb size",
+                    "The late reverb's mean delay length (ms): about the time between walls, and when the tail \
+                     starts (at least 1; -1 = the room preset's)",
+                    250.0,
+                ),
+                room_override(
+                    "room-falloff",
+                    "Room falloff",
+                    "How fast reflections and reverb fall with distance, as a share of the direct sound's fall in dB \
+                     (1 = as fast; less: far voices sound roomier; -1 = 0.75)",
+                    2.0,
+                ),
+                room_override(
+                    "reflection-spread",
+                    "Reflection spread",
+                    "How far apart the reflections heard from all around are in the two ears, as a share of each \
+                     delay (-1 = 0.08)",
+                    0.5,
+                ),
+                room_override(
+                    "reflection-diffusion",
+                    "Reflection diffusion",
+                    "The first reflection's share heard from all around rather than from the voice's direction, \
+                     rising evenly to all of it for the last (-1 = one over the number of reflections)",
+                    1.0,
+                ),
+                room_override(
+                    "near-floor",
+                    "Near floor",
+                    "Where near-distance's turn-down of a close voice's room stops (m; -1 = 0.5)",
+                    100.0,
+                ),
+                glib::ParamSpecBoxed::builder::<gst::Structure>("room-parameters")
+                    .nick("Room parameters")
+                    .blurb("The room's values in effect, its preset's with any overrides, and which are overridden \
+                            (field overridden: the property names)")
+                    .read_only()
+                    .build(),
+
                 // AudioAggregator properties we proxy for convenience and discoverability
 
                 glib::ParamSpecBoolean::builder("force-live")
@@ -449,6 +599,40 @@ impl ObjectImpl for AcousticMultiMixer {
                 scene.dirty = true;
             }
 
+            name if ROOM_OVERRIDES.contains(&name) => {
+                let state_guard = self.state.lock().unwrap();
+                let state = state_guard.as_ref().expect("state");
+                let mut scene = state.scene.lock().unwrap();
+                let o = &mut scene.room_overrides;
+                match name {
+                    "reflection-delays" => o.delays_ms = numbers(value),
+                    "reflection-levels" => o.levels_db = numbers(value),
+                    "wall-cutoff" => o.cutoff_hz = optional(value),
+                    "reverb-decay" => o.decay_s = optional(value),
+                    "reverb-treble-decay" => o.treble_decay_s = optional(value),
+                    "reverb-size" => o.size_ms = optional(value),
+                    "room-falloff" => o.falloff = optional(value),
+                    "reflection-spread" => o.spread = optional(value),
+                    "reflection-diffusion" => o.diffusion = optional(value),
+                    _ => o.near_floor = optional(value),
+                }
+                let o = o.clone();
+                if !o.delays_ms.is_empty()
+                    && !o.levels_db.is_empty()
+                    && o.delays_ms.len() != o.levels_db.len()
+                {
+                    gst::debug!(
+                        CAT,
+                        imp = self,
+                        "{} reflection delays and {} levels: using the first {}",
+                        o.delays_ms.len(),
+                        o.levels_db.len(),
+                        o.delays_ms.len().min(o.levels_db.len())
+                    );
+                }
+                scene.dirty = true;
+            }
+
             "distance-model" | "reference-distance" | "rolloff" | "max-range" | "taper" => {
                 let state_guard = self.state.lock().unwrap();
                 let state = state_guard.as_ref().expect("state");
@@ -515,6 +699,32 @@ impl ObjectImpl for AcousticMultiMixer {
                 }
             }
 
+            name if ROOM_OVERRIDES.contains(&name) => {
+                let state_guard = self.state.lock().unwrap();
+                let state = state_guard.as_ref().expect("state");
+                let o = state.scene.lock().unwrap().room_overrides.clone();
+                let number = |v: Option<f64>| v.unwrap_or(-1.0).to_value();
+                match name {
+                    "reflection-delays" => gst::Array::new(o.delays_ms).to_value(),
+                    "reflection-levels" => gst::Array::new(o.levels_db).to_value(),
+                    "wall-cutoff" => number(o.cutoff_hz),
+                    "reverb-decay" => number(o.decay_s),
+                    "reverb-treble-decay" => number(o.treble_decay_s),
+                    "reverb-size" => number(o.size_ms),
+                    "room-falloff" => number(o.falloff),
+                    "reflection-spread" => number(o.spread),
+                    "reflection-diffusion" => number(o.diffusion),
+                    _ => number(o.near_floor),
+                }
+            }
+
+            "room-parameters" => {
+                let state_guard = self.state.lock().unwrap();
+                let state = state_guard.as_ref().expect("state");
+                let scene = state.scene.lock().unwrap();
+                room_parameters(&scene).to_value()
+            }
+
             "distance-model" | "reference-distance" | "rolloff" | "max-range" | "taper" => {
                 let state_guard = self.state.lock().unwrap();
                 let state = state_guard.as_ref().expect("state");
@@ -551,6 +761,42 @@ impl ObjectImpl for AcousticMultiMixer {
             name => unimplemented!("{name}"),
         }
     }
+}
+
+/// `room-parameters`: the room's values in effect (the reverb's only when it has one; `wall-cutoff` 0 = none), and
+/// the names of the properties overriding its preset.
+fn room_parameters(scene: &Scene) -> gst::Structure {
+    let room = scene.room();
+    let mut s = gst::Structure::builder("room-parameters")
+        .field("room", scene.acoustics.room)
+        .field(
+            "reflection-delays",
+            gst::Array::new(room.taps.iter().map(|t| t.delay_ms)),
+        )
+        .field(
+            "reflection-levels",
+            gst::Array::new(room.taps.iter().map(|t| t.gain_db)),
+        )
+        .field(
+            "wall-cutoff",
+            if room.cutoff_hz.is_finite() {
+                room.cutoff_hz
+            } else {
+                0.0
+            },
+        )
+        .field("room-falloff", room.falloff)
+        .field("reflection-spread", room.spread)
+        .field("reflection-diffusion", room.diffusion)
+        .field("near-floor", room.near_floor)
+        .field("overridden", gst::Array::new(scene.room_overrides.names()))
+        .build();
+    if let Some(reverb) = room.reverb {
+        s.set("reverb-decay", reverb.decay_s);
+        s.set("reverb-treble-decay", reverb.treble_decay_s);
+        s.set("reverb-size", reverb.size_ms);
+    }
+    s
 }
 
 impl GstObjectImpl for AcousticMultiMixer {}

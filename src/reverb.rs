@@ -112,6 +112,33 @@ impl Network {
         }
     }
 
+    /// A voice's state from another network (the room's reverb before a change), so its tail carries on: each
+    /// line keeps the samples it was about to give out, as many as fit (a longer line gives out silence after
+    /// them, until what is fed in now comes round). The same lengths keep the state as it is.
+    pub fn adopt(&self, was: &Network, state: State) -> State {
+        if state.lines.len() != was.total {
+            return self.state();
+        }
+        if was.len == self.len {
+            return state;
+        }
+        let mut lines = vec![0.0; self.total];
+        for i in 0..LINES {
+            let old = &state.lines[was.offset[i]..was.offset[i] + was.len[i]];
+            for (to, from) in lines[self.offset[i]..self.offset[i] + self.len[i]]
+                .iter_mut()
+                .zip(old[state.at[i]..].iter().chain(&old[..state.at[i]]))
+            {
+                *to = *from;
+            }
+        }
+        State {
+            lines,
+            at: [0; LINES],
+            damp: state.damp,
+        }
+    }
+
     /// Feeds `input` into a voice's network and adds its tail to `left` and `right`.
     pub fn run(&self, state: &mut State, input: &[f32], left: &mut [f32], right: &mut [f32]) {
         debug_assert_eq!(state.lines.len(), self.total);
@@ -261,6 +288,55 @@ mod tests {
         let early = treble_share(&l[..(0.3 * RATE) as usize]);
         let late = treble_share(&l[(0.8 * RATE) as usize..]);
         assert!(late < 0.5 * early, "{early} {late}");
+    }
+
+    #[test]
+    fn an_adopted_state_carries_the_tail_on() {
+        let small = Room::Small.preset().reverb.unwrap();
+        let was = Network::new(&small, RATE);
+        let mut state = was.state();
+        let n = 2400;
+        let mut input = vec![0.0; n];
+        input[0] = 1.0;
+        let (mut l, mut r) = (vec![0.0; n], vec![0.0; n]);
+        was.run(&mut state, &input, &mut l, &mut r);
+
+        // Longer lines: what was in them comes out next, then silence until what goes in comes round.
+        let net = Network::new(
+            &Reverb {
+                size_ms: 30.0,
+                ..small
+            },
+            RATE,
+        );
+        let mut state = net.adopt(&was, state);
+        assert_eq!(state.lines.len(), net.total);
+        let (mut l, mut r) = (vec![0.0; n], vec![0.0; n]);
+        net.run(&mut state, &vec![0.0; n], &mut l, &mut r);
+        assert!(energy(&l[..480]) > 0.0 && energy(&r[..480]) > 0.0);
+
+        // The same lengths (a new decay time): the state as it was; a state from elsewhere: a silent one.
+        let same = Network::new(
+            &Reverb {
+                decay_s: 1.0,
+                ..small
+            },
+            RATE,
+        );
+        let kept = same.adopt(
+            &was,
+            State {
+                lines: vec![1.0; was.total],
+                ..State::default()
+            },
+        );
+        assert!(kept.lines.iter().all(|&v| v == 1.0));
+        assert!(
+            net.adopt(&was, State::default())
+                .lines
+                .iter()
+                .all(|&v| v == 0.0)
+        );
     }
 
     #[test]
